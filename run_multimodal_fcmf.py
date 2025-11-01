@@ -190,7 +190,11 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.pretrained_model,
+            trust_remote_code=True,
+            use_fast=False
+        )
     except:
         raise ValueError("Wrong pretrained model.")
     
