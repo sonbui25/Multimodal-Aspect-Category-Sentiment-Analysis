@@ -1,6 +1,6 @@
 transformers==4.35.0
 matplotlib==3.8.0
-numpy==1.23.1
+numpy==1.23.5
 opencv_python==4.8.1.78
 pandas==2.2.2
 Pillow==10.3.0
