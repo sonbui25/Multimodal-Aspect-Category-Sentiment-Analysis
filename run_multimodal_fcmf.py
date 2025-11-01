@@ -190,14 +190,9 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.pretrained_model,
-            use_fast=False,
-            trust_remote_code=True,
-            skip_chat_template=True  # <--- dòng quan trọng nhất
-        )
-    except Exception as e:
-        raise ValueError(f"Wrong pretrained model: {e}")
+        tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
+    except:
+        raise ValueError("Wrong pretrained model.")
     
 
     normalize_class = TextNormalize()
