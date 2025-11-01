@@ -192,11 +192,12 @@ def main():
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             args.pretrained_model,
+            use_fast=False,
             trust_remote_code=True,
-            use_fast=False
+            skip_chat_template=True  # <--- dòng quan trọng nhất
         )
-    except:
-        raise ValueError("Wrong pretrained model.")
+    except Exception as e:
+        raise ValueError(f"Wrong pretrained model: {e}")
     
 
     normalize_class = TextNormalize()
