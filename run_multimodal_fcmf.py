@@ -20,8 +20,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import json
 from  torch.cuda.amp import autocast
-import warnings
-warnings.filterwarnings("ignore")
 
 def warmup_linear(x, warmup=0.002):
     if x < warmup:
@@ -192,21 +190,9 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     try:
-        os.environ["TRANSFORMERS_OFFLINE"] = "0"
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.pretrained_model,
-            trust_remote_code=True,
-            use_fast=True,
-            legacy=False  # ← Tắt legacy mode
-        )
-    except Exception as e:
-        print(f"Warning: {e}")
-        print("Trying alternative loading method...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.pretrained_model,
-            trust_remote_code=True,
-            use_fast=False
-        )
+        tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
+    except:
+        raise ValueError("Wrong pretrained model.")
     
 
     normalize_class = TextNormalize()
@@ -256,14 +242,20 @@ def main():
     resnet_img = myResNetImg(resnet = img_res_model, if_fine_tune = args.fine_tune_cnn, device = device)
     resnet_roi = myResNetRoI(resnet = roi_res_model, if_fine_tune = args.fine_tune_cnn, device = device)
 
-    model.to(device)
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
+        resnet_img = torch.nn.DataParallel(resnet_img)  
+        resnet_roi = torch.nn.DataParallel(resnet_roi)
+        
+    model = model.to(device)
     resnet_img.to(device)
     resnet_roi.to(device)
 
     if args.ddp:
-        model = torch.nn.DataParallel(model, device_ids = [ddp_local_rank])
-        resnet_img = torch.nn.DataParallel(resnet_img, device_ids = [ddp_local_rank])
-        resnet_roi = torch.nn.DataParallel(resnet_roi, device_ids = [ddp_local_rank])
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[ddp_local_rank])
+        resnet_img = torch.nn.parallel.DistributedDataParallel(resnet_img, device_ids=[ddp_local_rank])
+        resnet_roi = torch.nn.parallel.DistributedDataParallel(resnet_roi, device_ids=[ddp_local_rank])
 
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
