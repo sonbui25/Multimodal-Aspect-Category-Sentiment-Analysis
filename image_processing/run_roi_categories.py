@@ -188,7 +188,9 @@ def main():
         num_train_steps = len(train_loader)*args.num_train_epochs
 
         model = MyRoIModel(len(ASPECT)) # No Location
-        model = model.to(device)
+        if torch.cuda.device_count() > 1 and not args.ddp:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            model = torch.nn.DataParallel(model)
 
         criterion = torch.nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(),lr = args.learning_rate)
