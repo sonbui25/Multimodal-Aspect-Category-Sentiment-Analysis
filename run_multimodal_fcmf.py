@@ -20,6 +20,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import json
 from  torch.cuda.amp import autocast
+import warnings
+warnings.filterwarnings("ignore")
 
 def warmup_linear(x, warmup=0.002):
     if x < warmup:
@@ -190,9 +192,21 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
-    except:
-        raise ValueError("Wrong pretrained model.")
+        os.environ["TRANSFORMERS_OFFLINE"] = "0"
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.pretrained_model,
+            trust_remote_code=True,
+            use_fast=True,
+            legacy=False  # ← Tắt legacy mode
+        )
+    except Exception as e:
+        print(f"Warning: {e}")
+        print("Trying alternative loading method...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.pretrained_model,
+            trust_remote_code=True,
+            use_fast=False
+        )
     
 
     normalize_class = TextNormalize()
