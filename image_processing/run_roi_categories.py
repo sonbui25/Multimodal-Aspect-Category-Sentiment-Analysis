@@ -188,9 +188,10 @@ def main():
         num_train_steps = len(train_loader)*args.num_train_epochs
 
         model = MyRoIModel(len(ASPECT)) # No Location
-        if torch.cuda.device_count() > 1 and not args.ddp:
+        if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
             model = torch.nn.DataParallel(model)
+        model = model.to(device)
 
         criterion = torch.nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(),lr = args.learning_rate)
@@ -378,6 +379,9 @@ def main():
         print("===================== GET ROI CATEGORIES =====================")
 
         model = MyRoIModel(len(ASPECT)) # No Location
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            model = torch.nn.DataParallel(model)
         model = model.to(device)
 
         if args.do_train:

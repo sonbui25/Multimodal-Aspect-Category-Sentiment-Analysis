@@ -533,6 +533,12 @@ def main():
         model.load_state_dict(model_checkpoint['model_state_dict'])
         resnet_img.load_state_dict(resimg_checkpoint['model_state_dict'])
         resnet_roi.load_state_dict(resroi_checkpoint['model_state_dict'])
+        
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            model = torch.nn.DataParallel(model)
+            resnet_img = torch.nn.DataParallel(resnet_img)
+            resnet_roi = torch.nn.DataParallel(resnet_roi)
 
         model = model.to(device)
         resnet_img = resnet_img.to(device)
