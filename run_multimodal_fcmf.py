@@ -178,7 +178,7 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    if ddp_world_size > 0:
+    if ddp_world_size > 1: #  change distributed training from ddp_world_size > 0 to ddp_world_size > 1 to run on local single gpu
         torch.cuda.manual_seed_all(args.seed)
         torch.distributed.init_process_group(backend='nccl')
 
