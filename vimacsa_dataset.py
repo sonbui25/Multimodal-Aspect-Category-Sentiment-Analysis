@@ -76,7 +76,7 @@ class MACSADataset(torch.utils.data.Dataset):
             list_aspect.append(asp)
             list_polar.append(pol)
 
-        for asp in self.ASPECT:
+        for asp in self.ASPECT: # Lấy hết các aspect trong danh sách ASPECT
             if "_" in asp:
                 asp = "Public area"
             if asp not in list_aspect:
@@ -89,7 +89,7 @@ class MACSADataset(torch.utils.data.Dataset):
         all_label_id = []
         all_added_input_mask = []
 
-        for ix in range(len(self.ASPECT)):
+        for ix in range(len(self.ASPECT)): # Biến đổi text đầu vào theo từng aspect và lấy nhãn polarity tương ứng
             asp = self.ASPECT[ix]
             if "_" in asp:
                 asp = "Public area"
