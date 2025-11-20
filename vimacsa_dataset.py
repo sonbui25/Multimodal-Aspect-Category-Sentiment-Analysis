@@ -76,7 +76,7 @@ class MACSADataset(torch.utils.data.Dataset):
             list_aspect.append(asp)
             list_polar.append(pol)
 
-        for asp in self.ASPECT: # Lấy hết các aspect trong danh sách ASPECT
+        for asp in self.ASPECT:
             if "_" in asp:
                 asp = "Public area"
             if asp not in list_aspect:
@@ -89,7 +89,7 @@ class MACSADataset(torch.utils.data.Dataset):
         all_label_id = []
         all_added_input_mask = []
 
-        for ix in range(len(self.ASPECT)): # Biến đổi text đầu vào theo từng aspect và lấy nhãn polarity tương ứng
+        for ix in range(len(self.ASPECT)):
             asp = self.ASPECT[ix]
             if "_" in asp:
                 asp = "Public area"
@@ -163,12 +163,12 @@ class MACSADataset(torch.utils.data.Dataset):
 
             list_roi_coor.append([x1,x2,y1,y2])
             list_roi_img.append(roi_transform)
-        
+
         #   print("For loop first:", len(list_roi_img))
-            if i_roi < self.num_roi:
-                for k in range(self.num_roi - i_roi-1):
-                    list_roi_img.append(np.zeros((3,224,224)))
-                    list_roi_coor.append(np.zeros((4,)))
+          if i_roi < self.num_roi:
+            for k in range(self.num_roi - i_roi-1):
+                list_roi_img.append(np.zeros((3,224,224)))
+                list_roi_coor.append(np.zeros((4,)))
 
           global_roi_features.append(list_roi_img)
           global_roi_coor.append(list_roi_coor)
