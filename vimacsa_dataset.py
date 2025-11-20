@@ -163,12 +163,12 @@ class MACSADataset(torch.utils.data.Dataset):
 
             list_roi_coor.append([x1,x2,y1,y2])
             list_roi_img.append(roi_transform)
-
+        
         #   print("For loop first:", len(list_roi_img))
-          if i_roi < self.num_roi:
-            for k in range(self.num_roi - i_roi-1):
-                list_roi_img.append(np.zeros((3,224,224)))
-                list_roi_coor.append(np.zeros((4,)))
+            if i_roi < self.num_roi:
+                for k in range(self.num_roi - i_roi-1):
+                    list_roi_img.append(np.zeros((3,224,224)))
+                    list_roi_coor.append(np.zeros((4,)))
 
           global_roi_features.append(list_roi_img)
           global_roi_coor.append(list_roi_coor)

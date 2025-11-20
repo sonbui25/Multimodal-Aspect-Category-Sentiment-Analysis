@@ -205,10 +205,9 @@ def main():
         raise ValueError("Can't find roi_data.csv")
     
     try:
-        with open(f'/kaggle/working/ViMACSA/resnet152_image_label.json') as imf:
+        with open(f'/kaggle/input/resnet-output/resnet152_image_label.json') as imf:
             dict_image_aspect = json.load(imf)
-
-        with open(f'/kaggle/working/ViMACSA/resnet152_roi_label.json') as rf:
+        with open(f'/kaggle/input/resnet-output/resnet152_roi_label.json') as rf:
             dict_roi_aspect = json.load(rf)
     except:
         raise ValueError("Get image/roi aspect category first. Please run run_image_categories.py or run_roi_categories.py")
@@ -513,7 +512,7 @@ def main():
 
                     max_f1 = eval_f1
 
-
+   
     if args.do_eval and (not args.ddp or torch.distributed.get_rank() == 0):
         # Load a trained model that highest f1-score
         model_checkpoint = load_model(f"{args.output_dir}/seed_{args.seed}_fcmf_model.pth")
