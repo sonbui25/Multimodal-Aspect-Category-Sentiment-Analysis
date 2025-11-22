@@ -18,7 +18,7 @@ class FCMF(nn.Module):
         self.vismap2text = nn.Linear(2048, HIDDEN_SIZE)
         self.roimap2text = nn.Linear(2048, HIDDEN_SIZE)
         self.box_head = BoxMultiHeadedAttention(8,HIDDEN_SIZE)
-
+        self.alpha = alpha
         self.text2img_attention = BertCrossEncoder()
         self.text2img_pooler = BertPooler()
         self.text2roi_pooler = BertPooler()
@@ -54,27 +54,24 @@ class FCMF(nn.Module):
             # 2. Chạy MDE (Lọc nhiễu)
             # Input: 49 patch + Mask 49 patch
             # Output: k patch
-            
-            image_features_denoised = self.MultimodalDenoisingEncoder(
-                sequence_output, 
-                converted_img_embed_map, 
-                extended_img_mask_orig, 
-            )
-            
-            # 3. TẠO MASK MỚI CHO K PATCH (Phần bạn cần thêm)
-            # Lấy số lượng k thực tế từ output của MDE
-            k_size = image_features_denoised.size(1) 
-            batch_size = image_features_denoised.size(0)
-            device = image_features_denoised.device
-            # Tạo mask toàn số 1 (vì k patch này đều là patch xịn, ko phải padding)
-            new_img_mask = torch.ones((batch_size, k_size), device=device)
-            
-            # Mở rộng mask theo chuẩn BERT (Batch, 1, 1, k)
-            extended_new_mask = new_img_mask.unsqueeze(1).unsqueeze(2)
-            extended_new_mask = extended_new_mask.to(dtype=image_features_denoised.dtype)
-            # Chuyển 0 -> -10000, 1 -> 0 (Logic: (1.0 - 1.0) * -10000 = 0)
-            extended_new_mask = (1.0 - extended_new_mask) * -10000.0
-
+            if self.alpha < 1.0:
+                image_features_denoised = self.MultimodalDenoisingEncoder(
+                    sequence_output, 
+                    converted_img_embed_map, 
+                )
+                # 3. TẠO MASK MỚI CHO K PATCH (Phần bạn cần thêm)
+                # Lấy số lượng k thực tế từ output của MDE
+                k_size = image_features_denoised.size(1) 
+                batch_size = image_features_denoised.size(0)
+                device = image_features_denoised.device
+                new_img_mask = torch.ones((batch_size, k_size), device=device)
+                extended_new_mask = new_img_mask.unsqueeze(1).unsqueeze(2)
+                extended_new_mask = extended_new_mask.to(dtype=image_features_denoised.dtype)
+                extended_new_mask = (1.0 - extended_new_mask) * -10000.0
+            else:
+                # Nếu alpha=1.0 thì không qua MDE, giữ nguyên 49 patch
+                image_features_denoised = converted_img_embed_map
+                extended_new_mask = extended_img_mask_orig
             # 4. Cross Attention (Dùng ảnh đã lọc + Mask mới)
             text2img_cross_attention = self.text2img_attention(
                 sequence_output, 

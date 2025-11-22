@@ -388,7 +388,7 @@ def main():
                             scheduler.step()
                             optimizer.zero_grad()
                             global_step += 1
-
+                        print('\n')
                         tepoch.set_postfix(loss=lll)
 
             if master_process:

@@ -435,132 +435,92 @@ class MultimodalDenoisingEncoder(nn.Module):
             dropout=0.1
         )
         
-        self.LayerNorm = BertLayerNorm(self.hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
+        # self.LayerNorm = BertLayerNorm(self.hidden_size, eps=1e-12)
+        # self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
 
-    def forward(self, text_hidden_states, image_hidden_states, image_mask=None):
+    def forward(self, text_hidden_states, image_hidden_states):
         """
         Args:
             text_hidden_states: [Batch, Seq, Hidden]
             image_hidden_states: [Batch, N, Hidden]
-            image_mask: [Batch, 1, 1, N] hoặc [Batch, N] (Mask: 1=Real, 0=Pad)
-                        Trong BERT thường là: 0=Pad, -10000=Masked (additive mask)
-                        Nhưng ở đây ta cần mask dạng 0/1 để nhân.
-                        Giả sử input 'image_mask' là Additive Mask của BERT (-10000.0 for pad).
         """
         B, N, H = image_hidden_states.shape
-        
+
         # ==================================================================
-        # 1. Scoring (Có Masking)
+        # 1. Scoring
         # ==================================================================
-        
         text_query = text_hidden_states[:, 0, :].unsqueeze(1)
         dummy_len = [N] * B
-        
+
         # Tính Score thô
         _, raw_scores = self.guidance_attention(image_hidden_states, text_query, dummy_len)
         # [B, 12, 1, 49] -> [B, 49]
         scores = raw_scores.view(B, NUM_ATTENTION_HEADS, 1, N).mean(dim=1).squeeze(1)
-        
-        # --- APPLY MASK VÀO SCORE ---
-        if image_mask is not None:
-            # image_mask input thường có dạng [B, 1, 1, N] với giá trị -10000.0 cho padding
-            # Ta cần squeeze để khớp với scores [B, N]
-            mask_squeeze = image_mask.squeeze(1).squeeze(1) # [B, N]
-            
-            # Cộng mask vào score (Padding sẽ có điểm số rất âm -> Không bao giờ lọt Top-K)
-            scores = scores + mask_squeeze
-            
+
         # ==================================================================
         # 2. Top-K Selection
         # ==================================================================
         k_strong = max(1, int(N * self.alpha))
+
         m_weak = N - k_strong
-        
+
         _, idx_strong = torch.topk(scores, k=k_strong, dim=1, largest=True)
-        # Padding sẽ tự động rơi xuống đáy (Weak) do điểm số thấp
         _, idx_weak = torch.topk(scores, k=m_weak, dim=1, largest=False)
-        
+
         # Helper gather
         def gather(feat, idx):
             expand_idx = idx.unsqueeze(-1).expand(-1, -1, H)
             return torch.gather(feat, 1, expand_idx)
-            
-        v_strong = gather(image_hidden_states, idx_strong) 
-        v_weak   = gather(image_hidden_states, idx_weak)   
-        
-        # Cần lấy cả Mask tương ứng cho V_Weak để sau này lọc Max-Pool
-        # (Vì có thể patch Weak vẫn chứa padding nếu ảnh quá nhỏ)
-        if image_mask is not None:
-            # Mask gốc (dạng 0/-10000)
-            mask_squeeze = image_mask.squeeze(1).squeeze(1) # [B, N]
-            
-            # Lấy mask của vùng Weak
-            mask_weak = torch.gather(mask_squeeze, 1, idx_weak) # [B, M]
-            
-            # Chuyển đổi Mask Weak sang dạng Boolean (True=Valid, False=Pad)
-            # Vì giá trị gốc là 0 (valid) và -10000 (pad)
-            is_weak_valid = (mask_weak > -100.0) # [B, M]
-        else:
-            is_weak_valid = torch.ones(B, m_weak, device=scores.device).bool()
+
+        v_strong = gather(image_hidden_states, idx_strong)
+        v_weak = gather(image_hidden_states, idx_weak)
 
         # ==================================================================
         # 3. Cosine Similarity
         # ==================================================================
         v_strong_norm = F.normalize(v_strong, p=2, dim=-1)
-        v_weak_norm   = F.normalize(v_weak, p=2, dim=-1)
+        v_weak_norm = F.normalize(v_weak, p=2, dim=-1)
         similarity_matrix = torch.matmul(v_weak_norm, v_strong_norm.transpose(-1, -2))
-        
+
         # ==================================================================
         # 4. Theta & Assignment
         # ==================================================================
         max_sim_vals, assignment_indices = torch.max(similarity_matrix, dim=-1)
-        
+
         e_val = math.e
         exp_S = torch.exp(max_sim_vals)
         theta_weak = exp_S / (exp_S + e_val)
-        
+
         # ==================================================================
-        # 5. Max-Pool Fusion (Có Masking Padding)
+        # 5. Max-Pool Fusion
         # ==================================================================
-        
         # A. Assignment Mask
-        assignment_mask = F.one_hot(assignment_indices, num_classes=k_strong).float() # [B, M, K]
-        
-        # B. Áp dụng Validity Mask cho V_Weak
-        # Nếu v_weak là padding, ta phải loại nó ra khỏi quá trình Max-Pool
-        # Expand is_weak_valid: [B, M] -> [B, M, 1]
-        is_weak_valid_expanded = is_weak_valid.unsqueeze(-1).float() 
-        
-        # Nhân assignment_mask với validity: Chỉ những patch Weak THẬT mới được assign
-        valid_assignment_mask = assignment_mask * is_weak_valid_expanded # [B, M, K]
-        
+        assignment_mask = F.one_hot(assignment_indices, num_classes=k_strong).float()  # [B, M, K]
+
         # C. Max-Pooling
-        v_weak_expanded = v_weak.unsqueeze(2) 
-        mask_expanded = valid_assignment_mask.unsqueeze(-1) # [B, M, K, 1]
-        
-        # Gán -inf cho những ô không thuộc nhóm HOẶC là padding
+        v_weak_expanded = v_weak.unsqueeze(2)
+        mask_expanded = assignment_mask.unsqueeze(-1)  # [B, M, K, 1]
+
+        # Gán -inf cho những ô không thuộc nhóm
         vectors_to_pool = v_weak_expanded.masked_fill(mask_expanded == 0, -1e4)
-        
+
         attended_weak_patches, _ = torch.max(vectors_to_pool, dim=1)
-        
+
         # D. Xử lý ô trống
-        has_valid_child = (torch.sum(valid_assignment_mask, dim=1, keepdim=True) > 0)
+        has_valid_child = (torch.sum(assignment_mask, dim=1, keepdim=True) > 0)
         attended_weak_patches = attended_weak_patches.masked_fill(~has_valid_child.transpose(1, 2), 0.0)
-        
+
         # E. Max-Pool Theta
-        theta_map = theta_weak.unsqueeze(-1) * valid_assignment_mask 
-        theta_map = theta_map.masked_fill(valid_assignment_mask == 0, -1e4)
+        theta_map = theta_weak.unsqueeze(-1) * assignment_mask
+        theta_map = theta_map.masked_fill(assignment_mask == 0, -1e4)
         theta_strong, _ = torch.max(theta_map, dim=1)
         theta_strong = theta_strong.masked_fill(theta_strong == -1e4, 0.0).unsqueeze(-1)
-        
+
         # F. Update
         v_strong_updated = (1 - theta_strong) * v_strong + theta_strong * attended_weak_patches
-        
+
         # ==================================================================
         # 6. Return
         # ==================================================================
-        output = self.LayerNorm(self.dropout(v_strong_updated))
-        
-        return output
+        return v_strong_updated
         
