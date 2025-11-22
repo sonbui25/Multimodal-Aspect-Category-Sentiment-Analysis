@@ -65,7 +65,6 @@ class FCMF(nn.Module):
             k_size = image_features_denoised.size(1) 
             batch_size = image_features_denoised.size(0)
             device = image_features_denoised.device
-            print(f"Sau khi lọc nhiễu thì giữ lại k patch ảnh mạnh nhất là: {k_size}")  # In ra k_size để kiểm tra
             # Tạo mask toàn số 1 (vì k patch này đều là patch xịn, ko phải padding)
             new_img_mask = torch.ones((batch_size, k_size), device=device)
             
