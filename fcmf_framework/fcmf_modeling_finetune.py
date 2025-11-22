@@ -58,7 +58,6 @@ class FCMF(nn.Module):
                 sequence_output, 
                 converted_img_embed_map, 
                 extended_img_mask_orig, 
-                alpha=alpha
             )
             
             # 3. TẠO MASK MỚI CHO K PATCH (Phần bạn cần thêm)
