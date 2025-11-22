@@ -1,7 +1,7 @@
 import torch
 from text_preprocess import *
 from vimacsa_dataset import *
-from fcmf_framework.fcmf_modeling import *
+from fcmf_framework.fcmf_modeling_finetune import *
 from sklearn.metrics import precision_recall_fscore_support
 import argparse
 import logging
@@ -129,7 +129,10 @@ def main():
     parser.add_argument('--fp16',
                         action='store_true',
                         help="Whether to use 16-bit float precision instead of 32-bit")
-
+    parser.add_argument('--alpha',
+                        type=float,
+                        default=0.7,
+                        help="Alpha value for keeping strong visual features")
     parser.add_argument('--fine_tune_cnn', action='store_true', help='fine tune pre-trained CNN if True')
     parser.add_argument('--add_layer', action='store_true', help='whether to add another encoder layer')
 
@@ -205,9 +208,9 @@ def main():
         raise ValueError("Can't find roi_data.csv")
     
     try:
-        with open(f'/kaggle/input/resnet-output/resnet152_image_label.json') as imf:
+        with open(f'/kaggle/input/resnet-output/resnet152_image_label.json') as imf: # Change to /kaggle/working/ViMACSA/resnet152_image_label.json when run in background
             dict_image_aspect = json.load(imf)
-        with open(f'/kaggle/input/resnet-output/resnet152_roi_label.json') as rf:
+        with open(f'/kaggle/input/resnet-output/resnet152_roi_label.json') as rf: # Change to /kaggle/working/ViMACSA/resnet152_roi_label.json when run in background
             dict_roi_aspect = json.load(rf)
     except:
         raise ValueError("Get image/roi aspect category first. Please run run_image_categories.py or run_roi_categories.py")
@@ -269,8 +272,7 @@ def main():
         mode = 'FP16'
         os.environ["TORCH_CUDNN_V8_API_ENABLED"] = "1"
         torch.backends.cuda.matmul.allow_tf32 = True if mode == 'TF32' else False
-        scaler = torch.cuda.amp.GradScaler(enabled=True if mode == 'FP16' else False)
-
+        scaler = torch.amp.GradScaler(enabled=True if mode == 'FP16' else False)
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters,
                         lr=args.learning_rate)
     
@@ -352,7 +354,8 @@ def main():
                                         added_attention_mask = all_added_input_mask[:,id_asp,:],
                                         visual_embeds_att = encoded_img,
                                         roi_embeds_att = encoded_roi,
-                                        roi_coors = roi_coors
+                                        roi_coors = roi_coors,
+                                        alpha = args.alpha
                                         )
                             loss = criterion(logits,all_label_id[:,id_asp])
                             if ddp_world_size > 1:
@@ -451,7 +454,8 @@ def main():
                                     added_attention_mask = all_added_input_mask[:,id_asp,:],
                                     visual_embeds_att = encoded_img,
                                     roi_embeds_att = encoded_roi,
-                                    roi_coors = roi_coors
+                                    roi_coors = roi_coors,
+                                    alpha = args.alpha
                             )
 
                             eval_loss = criterion(logits,all_label_id[:,id_asp])
@@ -619,7 +623,8 @@ def main():
                             added_attention_mask = all_added_input_mask[:,id_asp,:],
                             visual_embeds_att = encoded_img,
                             roi_embeds_att = encoded_roi,
-                            roi_coors = roi_coors
+                            roi_coors = roi_coors,
+                            alpha = args.alpha
                     )
 
                     eval_loss = criterion(logits,all_label_id[:,id_asp])

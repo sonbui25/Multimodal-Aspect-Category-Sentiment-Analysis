@@ -18,7 +18,7 @@ def gelu(x):
 def swish(x):
     return x * torch.sigmoid(x)
 
-HIDDEN_SIZE=768
+HIDDEN_SIZE=768 # for base model, set to 1024 for large model
 NUM_HIDDEN_LAYERS=12
 NUM_ATTENTION_HEADS=12 
 INTERMEDIATE_SIZE=3072
@@ -32,7 +32,7 @@ INITIALIZER_RANGE=0.02
 ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
 
 # for NAACL visual attention part
-class Attention(nn.Module):
+class Attention(nn.Module): #1
     def __init__(self, embed_dim, hidden_dim=None, n_head=1, score_function='scaled_dot_product', dropout=0.1):
         ''' Attention Mechanism
         :param embed_dim:
@@ -112,10 +112,10 @@ class Attention(nn.Module):
         output = torch.bmm(score, kx)  # (n_head*?, k_len, hidden_dim)
         output = torch.cat(torch.split(output, mb_size, dim=0), dim=-1)  # (?, k_len, n_head*hidden_dim)
         output = self.proj(output)  # (?, k_len, embed_dim)
-        return output
+        return output, score.squeeze(-1)
 
 
-class SelfAttention(Attention):
+class SelfAttention(Attention): #1
     '''q is a parameter'''
 
     def __init__(self, embed_dim, hidden_dim=None, n_head=1, score_function='scaled_dot_product', q_len=1, dropout=0.1):
@@ -129,7 +129,7 @@ class SelfAttention(Attention):
         return super(SelfAttention, self).forward(k, q)
 
 
-class BertLayerNorm(nn.Module):
+class BertLayerNorm(nn.Module): #2
     def __init__(self, hidden_size, eps=1e-12):
         """Construct a layernorm module in the TF style (epsilon inside the square root).
         """
@@ -145,7 +145,7 @@ class BertLayerNorm(nn.Module):
         return self.weight * x + self.bias
 
 
-class BertSelfAttention(nn.Module):
+class BertSelfAttention(nn.Module): #2
     def __init__(self):
         super(BertSelfAttention, self).__init__()
 
@@ -192,7 +192,7 @@ class BertSelfAttention(nn.Module):
         context_layer = context_layer.view(*new_context_layer_shape)
         return context_layer
 
-class BertCoAttention(nn.Module):
+class BertCoAttention(nn.Module): #3
     def __init__(self):
         super(BertCoAttention, self).__init__()
 
@@ -240,7 +240,7 @@ class BertCoAttention(nn.Module):
         return context_layer
 
 
-class BertSelfOutput(nn.Module):
+class BertSelfOutput(nn.Module): #2
     def __init__(self):
         super(BertSelfOutput, self).__init__()
         self.dense = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE)
@@ -254,7 +254,7 @@ class BertSelfOutput(nn.Module):
         return hidden_states
 
 
-class BertAttention(nn.Module):
+class BertAttention(nn.Module): #2
     def __init__(self):
         super(BertAttention, self).__init__()
         self.self = BertSelfAttention()
@@ -265,7 +265,7 @@ class BertAttention(nn.Module):
         attention_output = self.output(self_output, input_tensor)
         return attention_output
 
-class BertCrossAttention(nn.Module):
+class BertCrossAttention(nn.Module): #3
     def __init__(self):
         super(BertCrossAttention, self).__init__()
         self.self = BertCoAttention()
@@ -276,7 +276,7 @@ class BertCrossAttention(nn.Module):
         attention_output = self.output(s1_cross_output, s1_input_tensor)
         return attention_output
 
-class BertIntermediate(nn.Module):
+class BertIntermediate(nn.Module): # in BertLayer and BertCrossAttentionLayer
     def __init__(self):
         super(BertIntermediate, self).__init__()
         self.dense = nn.Linear(HIDDEN_SIZE, INTERMEDIATE_SIZE)
@@ -302,7 +302,7 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
-class BertLayer(nn.Module):
+class BertLayer(nn.Module): #2
     def __init__(self):
         super(BertLayer, self).__init__()
         self.attention = BertAttention()
@@ -315,7 +315,7 @@ class BertLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-class BertCrossAttentionLayer(nn.Module):
+class BertCrossAttentionLayer(nn.Module): #ok
     def __init__(self):
         super(BertCrossAttentionLayer, self).__init__()
         self.attention = BertCrossAttention()
@@ -328,23 +328,23 @@ class BertCrossAttentionLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-class BertEncoder(nn.Module):
-    def __init__(self):
-        super(BertEncoder, self).__init__()
-        layer = BertLayer()
-        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(NUM_HIDDEN_LAYERS)])
+# class BertEncoder(nn.Module): #2
+#     def __init__(self):
+#         super(BertEncoder, self).__init__()
+#         layer = BertLayer()
+#         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(NUM_HIDDEN_LAYERS)])
 
-    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
-        all_encoder_layers = []
-        for layer_module in self.layer:
-            hidden_states = layer_module(hidden_states, attention_mask)
-            if output_all_encoded_layers:
-                all_encoder_layers.append(hidden_states)
-        if not output_all_encoded_layers:
-            all_encoder_layers.append(hidden_states)
-        return all_encoder_layers
+#     def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
+#         all_encoder_layers = []
+#         for layer_module in self.layer:
+#             hidden_states = layer_module(hidden_states, attention_mask)
+#             if output_all_encoded_layers:
+#                 all_encoder_layers.append(hidden_states)
+#         if not output_all_encoded_layers:
+#             all_encoder_layers.append(hidden_states)
+#         return all_encoder_layers
 
-class MultimodalEncoder(nn.Module):
+class MultimodalEncoder(nn.Module): #ok
     def __init__(self):
         super(MultimodalEncoder, self).__init__()
         layer = BertLayer()
@@ -360,7 +360,7 @@ class MultimodalEncoder(nn.Module):
             all_encoder_layers.append(hidden_states)
         return all_encoder_layers
 
-class BertCrossEncoder(nn.Module):
+class BertCrossEncoder(nn.Module): #ok
     def __init__(self):
         super(BertCrossEncoder, self).__init__()
         layer = BertCrossAttentionLayer()
@@ -376,7 +376,7 @@ class BertCrossEncoder(nn.Module):
             all_encoder_layers.append(s1_hidden_states)
         return all_encoder_layers
 
-class BertText1Pooler(nn.Module):
+class BertText1Pooler(nn.Module): 
     def __init__(self):
         super(BertText1Pooler, self).__init__()
         self.dense = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE)
@@ -390,7 +390,7 @@ class BertText1Pooler(nn.Module):
         pooled_output = self.activation(pooled_output)
         return pooled_output
     
-class BertPooler(nn.Module):
+class BertPooler(nn.Module): #ok
     def __init__(self):
         super(BertPooler, self).__init__()
         self.dense = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE)
@@ -404,7 +404,7 @@ class BertPooler(nn.Module):
         pooled_output = self.activation(pooled_output)
         return pooled_output
 
-class FeatureExtractor(torch.nn.Module):
+class FeatureExtractor(torch.nn.Module): #ok
   def __init__(self, pretrained_path):
     super(FeatureExtractor,self).__init__()
     self.cell = AutoModel.from_pretrained(pretrained_path)
@@ -416,3 +416,147 @@ class FeatureExtractor(torch.nn.Module):
 
     return seq_out, pooled_out
 
+class MultimodalDenoisingEncoder(nn.Module):
+    def __init__(self, alpha=0.7): 
+        """
+        Multimodal Denoising Encoder (MDE) với cơ chế Max-Pooling Fusion.
+        """
+        super(MultimodalDenoisingEncoder, self).__init__()
+        self.alpha = alpha
+        self.hidden_size = HIDDEN_SIZE
+        
+        # Tận dụng class Attention có sẵn cho bước Guidance
+        # Lưu ý: Input ảnh vào đây là Key/Value, Text là Query
+        self.guidance_attention = Attention(
+            embed_dim=self.hidden_size, 
+            hidden_dim=self.hidden_size // NUM_ATTENTION_HEADS,
+            n_head=NUM_ATTENTION_HEADS, 
+            score_function='scaled_dot_product', 
+            dropout=0.1
+        )
+        
+        self.LayerNorm = BertLayerNorm(self.hidden_size, eps=1e-12)
+        self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
+
+    def forward(self, text_hidden_states, image_hidden_states):
+        """
+        Args:
+            text_hidden_states: [Batch, Seq_Len, Hidden]
+            image_hidden_states: [Batch, 49, Hidden]
+        """
+        B, N, H = image_hidden_states.shape
+        
+        # ==================================================================
+        # 1. Calculate attention scores for query (text) and key (image)
+        # ==================================================================
+        
+        # Lấy [CLS] token của text làm Query: [B, 1, H]
+        text_query = text_hidden_states[:, 0, :].unsqueeze(1)
+        
+        # Tạo memory_len giả (vì ảnh luôn có 49 patch)
+        dummy_len = [N] * B
+        
+        # Gọi hàm Attention có sẵn
+        # Hàm này trả về (output, score). Score gốc shape: [n_head*B, 1, N]
+        _, raw_scores = self.guidance_attention(image_hidden_states, text_query, dummy_len)
+        
+        # Xử lý Score từ Multi-Head: Reshape về [B, n_head, 1, N] rồi lấy trung bình các head
+        # raw_scores: [B*12, 1, 49] -> view -> [B, 12, 1, 49] -> mean(1) -> [B, 1, 49]
+        scores = raw_scores.view(B, NUM_ATTENTION_HEADS, 1, N).mean(dim=1)
+        scores = scores.squeeze(1) # [B, N]
+        
+        # ==================================================================
+        # 2. Separate between k strong patches and the rest weak patches
+        # ==================================================================
+        
+        k_strong = max(1, int(N * self.alpha))
+        m_weak = N - k_strong
+        
+        # Top-K Selection
+        _, idx_strong = torch.topk(scores, k=k_strong, dim=1, largest=True)
+        _, idx_weak = torch.topk(scores, k=m_weak, dim=1, largest=False)
+        
+        # Helper để lấy feature
+        def gather(feat, idx):
+            expand_idx = idx.unsqueeze(-1).expand(-1, -1, H)
+            return torch.gather(feat, 1, expand_idx)
+            
+        v_strong = gather(image_hidden_states, idx_strong) # [B, K, H]
+        v_weak   = gather(image_hidden_states, idx_weak)   # [B, M, H]
+        
+        # ==================================================================
+        # 3. Calculate cosine similarity between strong and weak patches
+        # ==================================================================
+        
+        # Chuẩn hóa L2 để Dot-Product tương đương Cosine Similarity
+        v_strong_norm = F.normalize(v_strong, p=2, dim=-1)
+        v_weak_norm   = F.normalize(v_weak, p=2, dim=-1)
+        
+        # Tính ma trận tương quan S_xy [B, M, K]
+        # Hàng (M): Weak patches, Cột (K): Strong patches
+        similarity_matrix = torch.matmul(v_weak_norm, v_strong_norm.transpose(-1, -2))
+        
+        # Tìm Strong patch phù hợp nhất cho mỗi Weak patch (Hard Assignment)
+        # max_sim_values: [B, M] (Giá trị tương đồng cao nhất)
+        # assignment_indices: [B, M] (Index của Strong patch được chọn, giá trị 0..K-1)
+        max_sim_values, assignment_indices = torch.max(similarity_matrix, dim=-1)
+        
+        # ==================================================================
+        # 4. Standardize the similarity scores -> Theta
+        # ==================================================================
+        
+        # Sử dụng công thức DaNet: Theta = exp(S) / (exp(S) + e)
+        # Đây là hàm Sigmoid dịch chuyển, phù hợp hơn Softmax cho gating scalar
+        e_val = math.e
+        exp_S = torch.exp(max_sim_values)
+        theta_weak = exp_S / (exp_S + e_val) # [B, M] - Theta của từng Weak patch
+        
+        # ==================================================================
+        # 5. Fusion Compression for strong patches (MAX-POOLING)
+        # ==================================================================
+        
+        # A. Tạo Mask gán nhãn (One-Hot Assignment)
+        # [B, M, K]: mask[b, m, k] = 1 nếu weak_m thuộc về strong_k
+        assignment_mask = F.one_hot(assignment_indices, num_classes=k_strong).float()
+        
+        # B. Chuẩn bị Max-Pooling cho Feature
+        # Mở rộng v_weak: [B, M, 1, H]
+        v_weak_expanded = v_weak.unsqueeze(2)
+        
+        # Mở rộng mask: [B, M, K, 1]
+        mask_expanded = assignment_mask.unsqueeze(-1)
+        
+        # Những ô không thuộc nhóm sẽ bị gán -inf để không được chọn khi Max-Pool
+        vectors_to_pool = v_weak_expanded.masked_fill(mask_expanded == 0, -1e9)
+        
+        # MAX-POOLING theo trục M (Weak patches)
+        # Output: [B, K, H] -> Mỗi Strong patch sẽ nhận được feature lớn nhất từ các weak patch con của nó
+        attended_weak_patches, _ = torch.max(vectors_to_pool, dim=1)
+        
+        # Xử lý trường hợp Strong patch "cô đơn" (không có Weak patch nào chọn nó)
+        # Lúc này giá trị vẫn là -inf, ta cần đưa về 0
+        has_weak_child = (torch.sum(assignment_mask, dim=1, keepdim=True) > 0) # [B, 1, K]
+        attended_weak_patches = attended_weak_patches.masked_fill(~has_weak_child.transpose(1, 2), 0.0)
+        
+        # C. Tính Theta tổng hợp cho Strong Patch (Max-Pool Theta)
+        # Tương tự, ta lấy Max Theta của các weak patches con
+        theta_map = theta_weak.unsqueeze(-1) * assignment_mask # [B, M, K]
+        theta_map = theta_map.masked_fill(assignment_mask == 0, -1e9)
+        
+        theta_strong, _ = torch.max(theta_map, dim=1) # [B, K]
+        theta_strong = theta_strong.masked_fill(theta_strong == -1e9, 0.0).unsqueeze(-1) # [B, K, 1]
+        
+        # D. Update Feature (Gated Merge)
+        # vector strong = (1-theta) * original + theta * attended (max-pooled)
+        v_strong_updated = (1 - theta_strong) * v_strong + theta_strong * attended_weak_patches
+        
+        # ==================================================================
+        # 6. Return denoised image features
+        # ==================================================================
+        
+        # Áp dụng Dropout và Norm
+        output = self.LayerNorm(self.dropout(v_strong_updated))
+        
+        # Trả về cả text (để khớp signature nếu cần) và ảnh đã lọc
+        return output
+        
