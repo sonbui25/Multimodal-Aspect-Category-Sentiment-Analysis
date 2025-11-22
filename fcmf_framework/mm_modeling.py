@@ -540,7 +540,7 @@ class MultimodalDenoisingEncoder(nn.Module):
         mask_expanded = valid_assignment_mask.unsqueeze(-1) # [B, M, K, 1]
         
         # Gán -inf cho những ô không thuộc nhóm HOẶC là padding
-        vectors_to_pool = v_weak_expanded.masked_fill(mask_expanded == 0, -1e9)
+        vectors_to_pool = v_weak_expanded.masked_fill(mask_expanded == 0, -1e4)
         
         attended_weak_patches, _ = torch.max(vectors_to_pool, dim=1)
         
@@ -550,9 +550,9 @@ class MultimodalDenoisingEncoder(nn.Module):
         
         # E. Max-Pool Theta
         theta_map = theta_weak.unsqueeze(-1) * valid_assignment_mask 
-        theta_map = theta_map.masked_fill(valid_assignment_mask == 0, -1e9)
+        theta_map = theta_map.masked_fill(valid_assignment_mask == 0, -1e4)
         theta_strong, _ = torch.max(theta_map, dim=1)
-        theta_strong = theta_strong.masked_fill(theta_strong == -1e9, 0.0).unsqueeze(-1)
+        theta_strong = theta_strong.masked_fill(theta_strong == -1e4, 0.0).unsqueeze(-1)
         
         # F. Update
         v_strong_updated = (1 - theta_strong) * v_strong + theta_strong * attended_weak_patches
