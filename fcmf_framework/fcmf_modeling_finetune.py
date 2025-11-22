@@ -28,7 +28,7 @@ class FCMF(nn.Module):
         self.text_pooler = BertPooler()
         self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
 
-    def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None, alpha=0.7):
+    def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None):
 
         sequence_output, pooled_output = self.bert(input_ids, token_type_ids, attention_mask)
 
@@ -54,6 +54,7 @@ class FCMF(nn.Module):
             # 2. Chạy MDE (Lọc nhiễu)
             # Input: 49 patch + Mask 49 patch
             # Output: k patch
+            
             image_features_denoised = self.MultimodalDenoisingEncoder(
                 sequence_output, 
                 converted_img_embed_map, 

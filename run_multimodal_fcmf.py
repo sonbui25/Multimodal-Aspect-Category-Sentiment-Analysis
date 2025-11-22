@@ -236,7 +236,8 @@ def main():
     model = FCMF(pretrained_path = args.pretrained_model,
                  num_labels = args.num_polarity,
                  num_imgs = args.num_imgs,
-                 num_roi = args.num_rois)
+                 num_roi = args.num_rois,
+                 alpha = args.alpha)
     
     img_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
     roi_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
@@ -354,8 +355,7 @@ def main():
                                         added_attention_mask = all_added_input_mask[:,id_asp,:],
                                         visual_embeds_att = encoded_img,
                                         roi_embeds_att = encoded_roi,
-                                        roi_coors = roi_coors,
-                                        alpha = args.alpha
+                                        roi_coors = roi_coors
                                         )
                             loss = criterion(logits,all_label_id[:,id_asp])
                             if ddp_world_size > 1:
@@ -454,8 +454,7 @@ def main():
                                     added_attention_mask = all_added_input_mask[:,id_asp,:],
                                     visual_embeds_att = encoded_img,
                                     roi_embeds_att = encoded_roi,
-                                    roi_coors = roi_coors,
-                                    alpha = args.alpha
+                                    roi_coors = roi_coors
                             )
 
                             eval_loss = criterion(logits,all_label_id[:,id_asp])
@@ -623,8 +622,7 @@ def main():
                             added_attention_mask = all_added_input_mask[:,id_asp,:],
                             visual_embeds_att = encoded_img,
                             roi_embeds_att = encoded_roi,
-                            roi_coors = roi_coors,
-                            alpha = args.alpha
+                            roi_coors = roi_coors
                     )
 
                     eval_loss = criterion(logits,all_label_id[:,id_asp])
