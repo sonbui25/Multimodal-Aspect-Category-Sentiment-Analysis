@@ -8,7 +8,7 @@ from transformers import AutoModel
 from .mm_modeling import *
 from .roi_modeling import *
 class FCMF(nn.Module):
-    def __init__(self, pretrained_path, num_labels=4, num_imgs = 7, num_roi = 7):
+    def __init__(self, pretrained_path, num_labels=4, num_imgs = 7, num_roi = 7, alpha=0.7):
         super(FCMF, self).__init__()
         self.num_labels = num_labels
         self.num_imgs = num_imgs
@@ -23,7 +23,7 @@ class FCMF(nn.Module):
         self.text2img_pooler = BertPooler()
         self.text2roi_pooler = BertPooler()
 
-        self.MultimodalDenoisingEncoder = MultimodalDenoisingEncoder()
+        self.MultimodalDenoisingEncoder = MultimodalDenoisingEncoder(alpha=alpha)
         self.mm_attention = MultimodalEncoder()
         self.text_pooler = BertPooler()
         self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
