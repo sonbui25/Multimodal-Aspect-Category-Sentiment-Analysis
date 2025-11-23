@@ -567,7 +567,7 @@ def main():
                     num_labels=args.num_polarity,
                     num_imgs=args.num_imgs,
                     num_roi=args.num_rois)
-
+        print("Is model using DataParallel?", isinstance(model, torch.nn.DataParallel))
         # Load state_dict từ checkpoint (xử lý tiền tố "module." nếu cần)
         model_state_dict = {k.replace("module.", ""): v for k, v in model_checkpoint['model_state_dict'].items()}
         model.load_state_dict(model_state_dict)
