@@ -32,11 +32,13 @@ def macro_f1(y_true, y_pred):
 
     return p_macro, r_macro, f_macro
 
-def save_model(path, model, epoch):
+def save_model(path, model, optimizer, scheduler, epoch):
     torch.save({
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
-    },path)
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+    }, path)
 
 def load_model(path):
     check_point = torch.load(path)
@@ -160,14 +162,30 @@ def main():
     print(f"Running on device:{ddp_local_rank}")
     if master_process:
         print("===================== RUN Fine-grained Cross-modal Fusion =====================")
-        logging.basicConfig(filename=f'training_fcmf.log',format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-                            datefmt = '%m/%d/%Y %H:%M:%S',
-                            level = logging.INFO)
 
+        # Đường dẫn file log (đảm bảo file được ghi vào thư mục làm việc hiện tại)
+        # log_file_path = "training_fcmf.log"
+        log_file_path = f'{args.output_dir}/training_fcmf.log'
+        # Cấu hình logging
         logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
 
+        # Định dạng log
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S')
+
+        # Ghi log vào file
+        file_handler = logging.FileHandler(log_file_path)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+        # Hiển thị log ra console
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+
+        # Log thông tin ban đầu
         logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
-        device, ddp_world_size, bool(args.ddp ), args.fp16))
+            device, ddp_world_size, bool(args.ddp), args.fp16))
 
     if args.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
@@ -251,9 +269,16 @@ def main():
         resnet_img = torch.nn.DataParallel(resnet_img)  
         resnet_roi = torch.nn.DataParallel(resnet_roi)
         
+    # Load a trained model that highest f1-score and continue training
+    model_checkpoint = load_model(f"/kaggle/input/checkpoint/seed_{args.seed}_fcmf_model.pth")
+    resimg_checkpoint = load_model(f"/kaggle/input/checkpoint/seed_{args.seed}_resimg_model.pth")
+    resroi_checkpoint = load_model(f"/kaggle/input/checkpoint/seed_{args.seed}_resroi_model.pth")
+    model.load_state_dict(model_checkpoint['model_state_dict'])
+    resnet_img.load_state_dict(resimg_checkpoint['model_state_dict'])
+    resnet_roi.load_state_dict(resroi_checkpoint['model_state_dict'])
     model = model.to(device)
-    resnet_img.to(device)
-    resnet_roi.to(device)
+    resnet_img = resnet_img.to(device)
+    resnet_roi = resnet_roi.to(device)
 
     if args.ddp:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[ddp_local_rank])
@@ -501,7 +526,7 @@ def main():
                             'recall_score':all_recall,
                             'f_score': all_f1,
                             }
-                # print(f"Dev: Precision = {all_precision}, Recall = {all_recall}, F1-score = {all_f1}")
+                print(f"Dev: Precision = {all_precision}, Recall = {all_recall}, F1-score = {all_f1}, Loss = {epoch_loss}")
                 logger.info("***** Dev results *****")
                 for key in sorted(results.keys()):
                     logger.info("  %s = %s", key, str(results[key]))
@@ -512,16 +537,18 @@ def main():
                         save_model(f'{args.output_dir}/seed_{args.seed}_fcmf_model.pth',model,train_idx)
                         save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model.pth',resnet_img,train_idx)
                         save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model.pth',resnet_roi,train_idx)
-
+                    print(f"  Best f1-score: {eval_f1} at epoch {train_idx}")
                     max_f1 = eval_f1
 
    
     if args.do_eval and (not args.ddp or torch.distributed.get_rank() == 0):
         # Load a trained model that highest f1-score
-        model_checkpoint = load_model(f"{args.output_dir}/seed_{args.seed}_fcmf_model.pth")
-        resimg_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resimg_model.pth')
-        resroi_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resroi_model.pth')
-
+        # model_checkpoint = load_model(f"{args.output_dir}/seed_{args.seed}_fcmf_model.pth")
+        # resimg_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resimg_model.pth')
+        # resroi_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resroi_model.pth')
+        model_checkpoint = load_model(f"/kaggle/input/checkpoint/seed_{args.seed}_fcmf_model.pth")
+        resimg_checkpoint = load_model(f"/kaggle/input/checkpoint/seed_{args.seed}_resimg_model.pth")
+        resroi_checkpoint = load_model(f"/kaggle/input/checkpoint/seed_{args.seed}_resroi_model.pth")
         img_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
         roi_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
         resnet_img = myResNetImg(resnet = img_res_model, if_fine_tune = args.fine_tune_cnn, device = device)

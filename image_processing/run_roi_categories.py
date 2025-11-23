@@ -17,11 +17,6 @@ from torchvision.models import resnet152,ResNet152_Weights,resnet50, ResNet50_We
 import random
 import logging
 
-logging.basicConfig(filename='roi_categories.log',format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-                    datefmt = '%m/%d/%Y %H:%M:%S',
-                    level = logging.INFO)
-logger = logging.getLogger(__name__)
-
 class RoiDataset(Dataset):
     def __init__(self, data, root_dir, ASPECT):
         self.image_label = data
@@ -162,7 +157,10 @@ def main():
 
     if not args.do_train and not args.get_cate:
         raise ValueError("At least one of `do_train` or `get_cate` must be True.")
-
+    logging.basicConfig(filename=f'{args.output_dir}/roi_categories.log',format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
+                    datefmt = '%m/%d/%Y %H:%M:%S',
+                    level = logging.INFO)
+    logger = logging.getLogger(__name__)
     ASPECT = ['food', 'room', 'facilities', 'service', 'public_area'] # Our predefined aspect category
 
     if args.do_train:
