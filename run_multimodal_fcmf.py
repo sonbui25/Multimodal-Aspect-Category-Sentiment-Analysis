@@ -273,9 +273,16 @@ def main():
     model_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_fcmf_model.pth")
     resimg_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resimg_model.pth")
     resroi_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resroi_model.pth")
-    model.load_state_dict(model_checkpoint['model_state_dict'])
-    resnet_img.load_state_dict(resimg_checkpoint['model_state_dict'])
-    resnet_roi.load_state_dict(resroi_checkpoint['model_state_dict'])
+    
+    # Remove "module." prefix if the model was trained using DataParallel
+    model_state_dict = {k.replace("module.", ""): v for k, v in model_checkpoint['model_state_dict'].items()}
+    model.load_state_dict(model_state_dict)
+    resimg_state_dict = {k.replace("module.", ""): v for k, v in resimg_checkpoint['model_state_dict'].items()}
+    resnet_img.load_state_dict(resimg_state_dict)
+    resroi_state_dict = {k.replace("module.", ""): v for k, v in resroi_checkpoint['model_state_dict'].items()}
+    resnet_roi.load_state_dict(resroi_state_dict)
+    
+    # Move models to device
     model = model.to(device)
     resnet_img = resnet_img.to(device)
     resnet_roi = resnet_roi.to(device)
@@ -558,10 +565,12 @@ def main():
                     num_labels = args.num_polarity,
                     num_imgs = args.num_imgs,
                     num_roi = args.num_rois)
-
-        model.load_state_dict(model_checkpoint['model_state_dict'])
-        resnet_img.load_state_dict(resimg_checkpoint['model_state_dict'])
-        resnet_roi.load_state_dict(resroi_checkpoint['model_state_dict'])
+        model_state_dict = {k.replace("module.", ""): v for k, v in model_checkpoint['model_state_dict'].items()}
+        model.load_state_dict(model_state_dict)
+        resimg_state_dict = {k.replace("module.", ""): v for k, v in resimg_checkpoint['model_state_dict'].items()}
+        resnet_img.load_state_dict(resimg_state_dict)
+        resroi_state_dict = {k.replace("module.", ""): v for k, v in resroi_checkpoint['model_state_dict'].items()}
+        resnet_roi.load_state_dict(resroi_state_dict)
         
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
