@@ -549,35 +549,36 @@ def main():
 
    
     if args.do_eval and (not args.ddp or torch.distributed.get_rank() == 0):
-        # Load a trained model that highest f1-score
+        # Load checkpoint
         # model_checkpoint = load_model(f"{args.output_dir}/seed_{args.seed}_fcmf_model.pth")
         # resimg_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resimg_model.pth')
         # resroi_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resroi_model.pth')
+
         model_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_fcmf_model.pth")
         resimg_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resimg_model.pth")
         resroi_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resroi_model.pth")
-        img_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
-        roi_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
-        resnet_img = myResNetImg(resnet = img_res_model, if_fine_tune = args.fine_tune_cnn, device = device)
-        resnet_roi = myResNetRoI(resnet = roi_res_model, if_fine_tune = args.fine_tune_cnn, device = device)
+        # Khởi tạo mô hình và các thành phần
+        img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
+        roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
+        resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
+        resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
 
-        model = FCMF(pretrained_path = args.pretrained_model,
-                    num_labels = args.num_polarity,
-                    num_imgs = args.num_imgs,
-                    num_roi = args.num_rois)
+        model = FCMF(pretrained_path=args.pretrained_model,
+                    num_labels=args.num_polarity,
+                    num_imgs=args.num_imgs,
+                    num_roi=args.num_rois)
+
+        # Load state_dict từ checkpoint (xử lý tiền tố "module." nếu cần)
         model_state_dict = {k.replace("module.", ""): v for k, v in model_checkpoint['model_state_dict'].items()}
         model.load_state_dict(model_state_dict)
+
         resimg_state_dict = {k.replace("module.", ""): v for k, v in resimg_checkpoint['model_state_dict'].items()}
         resnet_img.load_state_dict(resimg_state_dict)
+
         resroi_state_dict = {k.replace("module.", ""): v for k, v in resroi_checkpoint['model_state_dict'].items()}
         resnet_roi.load_state_dict(resroi_state_dict)
-        
-        if torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-            model = torch.nn.DataParallel(model)
-            resnet_img = torch.nn.DataParallel(resnet_img)
-            resnet_roi = torch.nn.DataParallel(resnet_roi)
 
+        # Chuyển mô hình và các thành phần sang thiết bị (device)
         model = model.to(device)
         resnet_img = resnet_img.to(device)
         resnet_roi = resnet_roi.to(device)
