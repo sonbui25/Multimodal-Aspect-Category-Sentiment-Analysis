@@ -251,41 +251,38 @@ def main():
         train_dataset = MACSADataset(train_data,tokenizer,f"{args.image_dir}",roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         dev_dataset = MACSADataset(dev_data,tokenizer,f"{args.image_dir}",roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
 
-    model = FCMF(pretrained_path = args.pretrained_model,
-                 num_labels = args.num_polarity,
-                 num_imgs = args.num_imgs,
-                 num_roi = args.num_rois,
-                 alpha = args.alpha)
-    
-    img_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
-    roi_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
-
-    resnet_img = myResNetImg(resnet = img_res_model, if_fine_tune = args.fine_tune_cnn, device = device)
-    resnet_roi = myResNetRoI(resnet = roi_res_model, if_fine_tune = args.fine_tune_cnn, device = device)
-
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = torch.nn.DataParallel(model)
-        resnet_img = torch.nn.DataParallel(resnet_img)  
-        resnet_roi = torch.nn.DataParallel(resnet_roi)
+        model = FCMF(pretrained_path = args.pretrained_model,
+                    num_labels = args.num_polarity,
+                    num_imgs = args.num_imgs,
+                    num_roi = args.num_rois,
+                    alpha = args.alpha)
         
-    # Load a trained model that highest f1-score and continue training
-    model_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_fcmf_model.pth")
-    resimg_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resimg_model.pth")
-    resroi_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resroi_model.pth")
-    
-    # Remove "module." prefix if the model was trained using DataParallel
-    model_state_dict = {k.replace("module.", ""): v for k, v in model_checkpoint['model_state_dict'].items()}
-    model.load_state_dict(model_state_dict)
-    resimg_state_dict = {k.replace("module.", ""): v for k, v in resimg_checkpoint['model_state_dict'].items()}
-    resnet_img.load_state_dict(resimg_state_dict)
-    resroi_state_dict = {k.replace("module.", ""): v for k, v in resroi_checkpoint['model_state_dict'].items()}
-    resnet_roi.load_state_dict(resroi_state_dict)
-    
-    # Move models to device
-    model = model.to(device)
-    resnet_img = resnet_img.to(device)
-    resnet_roi = resnet_roi.to(device)
+        img_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
+        roi_res_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2).to(device)
+
+        resnet_img = myResNetImg(resnet = img_res_model, if_fine_tune = args.fine_tune_cnn, device = device)
+        resnet_roi = myResNetRoI(resnet = roi_res_model, if_fine_tune = args.fine_tune_cnn, device = device)
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            model = torch.nn.DataParallel(model)
+            resnet_img = torch.nn.DataParallel(resnet_img)  
+            resnet_roi = torch.nn.DataParallel(resnet_roi)
+            
+        # Load a trained model that highest f1-score and continue training
+        model_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_fcmf_model.pth")
+        resimg_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resimg_model.pth")
+        resroi_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resroi_model.pth")
+        
+        # Remove "module." prefix if the model was trained using DataParallel
+        model_state_dict = {k.replace("module.", ""): v for k, v in model_checkpoint['model_state_dict'].items()}
+        model.load_state_dict(model_state_dict)
+        resimg_state_dict = {k.replace("module.", ""): v for k, v in resimg_checkpoint['model_state_dict'].items()}
+        resnet_img.load_state_dict(resimg_state_dict)
+        resroi_state_dict = {k.replace("module.", ""): v for k, v in resroi_checkpoint['model_state_dict'].items()}
+        resnet_roi.load_state_dict(resroi_state_dict)
+        
+        # Move models to device
+        model = model.to(device)
 
     if args.ddp:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[ddp_local_rank])
@@ -567,7 +564,6 @@ def main():
                     num_labels=args.num_polarity,
                     num_imgs=args.num_imgs,
                     num_roi=args.num_rois)
-        print("Is model using DataParallel?", isinstance(model, torch.nn.DataParallel))
         # Load state_dict từ checkpoint (xử lý tiền tố "module." nếu cần)
         model_state_dict = {k.replace("module.", ""): v for k, v in model_checkpoint['model_state_dict'].items()}
         model.load_state_dict(model_state_dict)
@@ -580,8 +576,6 @@ def main():
 
         # Chuyển mô hình và các thành phần sang thiết bị (device)
         model = model.to(device)
-        resnet_img = resnet_img.to(device)
-        resnet_roi = resnet_roi.to(device)
 
         # LOAD TEST EVAL
         test_data = pd.read_json(f'{args.data_dir}/test.json')
