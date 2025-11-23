@@ -281,8 +281,9 @@ def main():
         resroi_state_dict = {k.replace("module.", ""): v for k, v in resroi_checkpoint['model_state_dict'].items()}
         resnet_roi.load_state_dict(resroi_state_dict)
         
-        # Move models to device
-        model = model.to(device)
+    # Move models to device
+    model = model.to(device)
+        
 
     if args.ddp:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[ddp_local_rank])
