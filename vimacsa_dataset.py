@@ -106,7 +106,7 @@ class MACSADataset(torch.utils.data.Dataset):
             input_ids = torch.tensor(tokens['input_ids'])
             token_type_ids = torch.tensor(tokens['token_type_ids'])
             attention_mask = torch.tensor(tokens['attention_mask'])
-            added_input_mask =torch.tensor( [1] * (170+49))
+            added_input_mask = torch.tensor( [1] * (170+49))
 
             label_id = list_polar[idx_asp_in_list_asp]
 

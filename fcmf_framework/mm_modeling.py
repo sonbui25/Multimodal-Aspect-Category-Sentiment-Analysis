@@ -115,25 +115,25 @@ class Attention(nn.Module): #1
         return output, score.squeeze(-1)
 
 
-class SelfAttention(Attention): #1
-    '''q is a parameter'''
+# class SelfAttention(Attention): #1
+#     '''q is a parameter'''
 
-    def __init__(self, embed_dim, hidden_dim=None, n_head=1, score_function='scaled_dot_product', q_len=1, dropout=0.1):
-        super(SelfAttention, self).__init__(embed_dim, hidden_dim, n_head, score_function, dropout)
-        self.q_len = q_len
-        self.q = nn.Parameter(torch.FloatTensor(q_len, embed_dim))
+#     def __init__(self, embed_dim, hidden_dim=None, n_head=1, score_function='scaled_dot_product', q_len=1, dropout=0.1):
+#         super(SelfAttention, self).__init__(embed_dim, hidden_dim, n_head, score_function, dropout)
+#         self.q_len = q_len
+#         self.q = nn.Parameter(torch.FloatTensor(q_len, embed_dim))
 
-    def forward(self, k, **kwargs):
-        mb_size = k.shape[0]
-        q = self.q.expand(mb_size, -1, -1)
-        return super(SelfAttention, self).forward(k, q)
+#     def forward(self, k, **kwargs):
+#         mb_size = k.shape[0]
+#         q = self.q.expand(mb_size, -1, -1)
+#         return super(SelfAttention, self).forward(k, q)
 
 
-class BertLayerNorm(nn.Module): #2
+class FCMFLayerNorm(nn.Module): #2
     def __init__(self, hidden_size, eps=1e-12):
         """Construct a layernorm module in the TF style (epsilon inside the square root).
         """
-        super(BertLayerNorm, self).__init__()
+        super(FCMFLayerNorm, self).__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.bias = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
@@ -244,7 +244,7 @@ class BertSelfOutput(nn.Module): #2
     def __init__(self):
         super(BertSelfOutput, self).__init__()
         self.dense = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE)
-        self.LayerNorm = BertLayerNorm(HIDDEN_SIZE, eps=1e-12)
+        self.LayerNorm = FCMFLayerNorm(HIDDEN_SIZE, eps=1e-12)
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
 
     def forward(self, hidden_states, input_tensor):
@@ -292,7 +292,7 @@ class BertOutput(nn.Module):
     def __init__(self):
         super(BertOutput, self).__init__()
         self.dense = nn.Linear(INTERMEDIATE_SIZE, HIDDEN_SIZE)
-        self.LayerNorm = BertLayerNorm(HIDDEN_SIZE, eps=1e-12)
+        self.LayerNorm = FCMFLayerNorm(HIDDEN_SIZE, eps=1e-12)
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
 
     def forward(self, hidden_states, input_tensor):
@@ -435,7 +435,7 @@ class MultimodalDenoisingEncoder(nn.Module):
             dropout=0.1
         )
         
-        # self.LayerNorm = BertLayerNorm(self.hidden_size, eps=1e-12)
+        # self.LayerNorm = FCMFLayerNorm(self.hidden_size, eps=1e-12)
         # self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
 
     def forward(self, text_hidden_states, image_hidden_states):
@@ -523,4 +523,103 @@ class MultimodalDenoisingEncoder(nn.Module):
         # 6. Return
         # ==================================================================
         return v_strong_updated
+
+    # Transformer Decoder related modules
+class PositionWiseFFN(nn.Module):
+    def __init__(self, ffn_num_hiddens, ffn_num_outputs):
+        super(PositionWiseFFN, self).__init__()
+        self.dense1 = nn.LazyLinear(ffn_num_hiddens)
+        self.relu = nn.ReLU()
+        self.dense2 = nn.LazyLinear(ffn_num_outputs)
+    def forward(self, x):
+        return self.dense2(self.relu(self.dense1(x)))
+class AddNorm(nn.Module):
+    "The residual connection followed by layer normalization."
+    def __init__(self, norm_shape,  dropout):
+        super(AddNorm, self).__init__()
+        self.dropout = nn.Dropout(dropout)
+        self.ln = FCMFLayerNorm(norm_shape)
+    def forward(self, X, Y):
+        return self.ln(self.dropout(Y) + X)
+class TransformerDecoderBlock(nn.Module):
+    # The i-th block of the transformer decoder
+    def __init__(self, i):
+        super(TransformerDecoderBlock, self).__init__()
+        self.i = i
+        self.attention1 = Attention(HIDDEN_SIZE, HIDDEN_SIZE // NUM_ATTENTION_HEADS, NUM_ATTENTION_HEADS, 'scaled_dot_product', ATTENTION_PROBS_DROPOUT_PROB)
+        self.addnorm1 = AddNorm(HIDDEN_SIZE, ATTENTION_PROBS_DROPOUT_PROB)
+        self.attention2 = Attention(HIDDEN_SIZE, HIDDEN_SIZE // NUM_ATTENTION_HEADS, NUM_ATTENTION_HEADS, 'scaled_dot_product', ATTENTION_PROBS_DROPOUT_PROB)
+        self.addnorm2 = AddNorm(HIDDEN_SIZE, ATTENTION_PROBS_DROPOUT_PROB)
+        self.ffn = PositionWiseFFN(HIDDEN_SIZE, HIDDEN_SIZE)
+        self.add_norm3 = AddNorm(HIDDEN_SIZE, ATTENTION_PROBS_DROPOUT_PROB)
+    def forward(self, X, state):
+        enc_outputs, enc_valid_lens = state[0], state[1]
+        if state[2][self.i] is None:
+            key_values = X
+        else:
+            key_values = torch.cat((state[2][self.i], X), dim=1)
+            state[2][self.i] = key_values
+        if self.training:
+            batch_size, num_steps, _ = X.shape
+            # Shape of dec_valid_lens: (batch_size, num_steps)
+            dec_valid_lens = torch.arange(1, num_steps + 1, device=X.device).repeat(batch_size, 1)
+        else:
+            dec_valid_lens = None
+        # Self-attention
+        X2 = self.attention1(X, X, dec_valid_lens)
+        Y = self.addnorm1(X, X2)
+        # Encoder-decoder attention
+        Y2 = self.attention2(enc_outputs, Y, enc_valid_lens)
+        Z = self.addnorm2(Y, Y2)
+        return self.add_norm3(Z, self.ffn(Z)), state
+    
+class PositionalEncoding(nn.Module): 
+    """Positional encoding."""
+    def __init__(self, max_len=1000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(ATTENTION_PROBS_DROPOUT_PROB)
+        # Create a long enough P
+        self.P = torch.zeros((1, max_len, HIDDEN_SIZE))
+        X = torch.arange(max_len, dtype=torch.float32).reshape(
+            -1, 1) / torch.pow(10000, torch.arange(
+            0, HIDDEN_SIZE, 2, dtype=torch.float32) / HIDDEN_SIZE)
+        self.P[:, :, 0::2] = torch.sin(X)
+        self.P[:, :, 1::2] = torch.cos(X)
+
+    def forward(self, X):
+        X = X + self.P[:, :X.shape[1], :].to(X.device)
+        return self.dropout(X)
+class IAOGDecoder(nn.Module):
+    def __init__(self, vocab_size):
+        super(IAOGDecoder, self).__init__()
+        self.num_hiddens = HIDDEN_SIZE
+        self.num_blks = NUM_HIDDEN_LAYERS
+        self.embedding = nn.Embedding(vocab_size, self.num_hiddens)
+        self.pos_encoding = PositionalEncoding()
+        self.blks = nn.Sequential()
+        for i in range(NUM_HIDDEN_LAYERS):
+            self.blks.add_module('block' + str(i), TransformerDecoderBlock(i))
+        self.dense = nn.Linear(self.num_hiddens, vocab_size)
+    
+    def init_state(self, enc_outputs, enc_valid_lens):
+        return [enc_outputs, enc_valid_lens, [None] * self.num_blks]
+
+    def forward(self, X, state):
+        X = self.pos_encoding(self.embedding(X) * math.sqrt(self.num_hiddens))
+        self._attention_weights = [[None] * len(self.blks) for _ in range (2)]
+        for i, blk in enumerate(self.blks):
+            X, state = blk(X, state)
+            # Decoder self-attention weights
+            self._attention_weights[0][
+                i] = blk.attention1.attention.attention_weights
+            # Encoder-decoder attention weights
+            self._attention_weights[1][
+                i] = blk.attention2.attention.attention_weights
+        return self.dense(X), state
+
+    @property
+    def attention_weights(self):
+        return self._attention_weights
+
+        
         

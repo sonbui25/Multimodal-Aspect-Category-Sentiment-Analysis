@@ -1,7 +1,7 @@
 import torch
 from text_preprocess import *
 from vimacsa_dataset import *
-from fcmf_framework.fcmf_modeling_finetune import *
+from fcmf_framework.fcmf_finetune import *
 from sklearn.metrics import precision_recall_fscore_support
 import argparse
 import logging
@@ -532,6 +532,7 @@ def main():
                 logger.info("***** Dev results *****")
                 for key in sorted(results.keys()):
                     logger.info("  %s = %s", key, str(results[key]))
+                    writer.write(f"{key} = {str(results[key])}\n")
 
                 if eval_f1 >= max_f1:
                     # Save a trained model    
@@ -539,19 +540,19 @@ def main():
                         save_model(f'{args.output_dir}/seed_{args.seed}_fcmf_model.pth',model,train_idx)
                         save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model.pth',resnet_img,train_idx)
                         save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model.pth',resnet_roi,train_idx)
-                    print(f"  Best f1-score: {eval_f1} at epoch {train_idx}")
                     max_f1 = eval_f1
+                    print(f"Best f1-score validation: {max_f1} at epoch {train_idx}")
 
    
     if args.do_eval and (not args.ddp or torch.distributed.get_rank() == 0):
         # Load checkpoint
-        # model_checkpoint = load_model(f"{args.output_dir}/seed_{args.seed}_fcmf_model.pth")
-        # resimg_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resimg_model.pth')
-        # resroi_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resroi_model.pth')
-
-        model_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_fcmf_model.pth")
-        resimg_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resimg_model.pth")
-        resroi_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resroi_model.pth")
+        print("Use 1 GPU for evaluation")
+        model_checkpoint = load_model(f"{args.output_dir}/seed_{args.seed}_fcmf_model.pth")
+        resimg_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resimg_model.pth')
+        resroi_checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_resroi_model.pth')
+        # model_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_fcmf_model.pth")
+        # resimg_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resimg_model.pth")
+        # resroi_checkpoint = load_model(f"/kaggle/input/checkpoint/pytorch/default/1/seed_{args.seed}_resroi_model.pth")
         # Khởi tạo mô hình và các thành phần
         img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
         roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
