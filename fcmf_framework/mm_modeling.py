@@ -109,7 +109,8 @@ class Attention(nn.Module):
         output = torch.bmm(score, kx)
         output = torch.cat(torch.split(output, mb_size, dim=0), dim=-1)
         output = self.proj(output)
-        
+        print(f"output: {output}")
+        print(f"score: {score}")
         return output, score
 
 
@@ -576,8 +577,6 @@ class TransformerDecoderBlock(nn.Module):
         # Encoder-decoder attention
         Y2, _ = self.attention2(enc_outputs, Y, enc_valid_lens)
         Z = self.addnorm2(Y, Y2)
-        print(f"Self-attention: {X2}")
-        print(f"Encoder-Decoder attention: {Y2}")
         return self.add_norm3(Z, self.ffn(Z)), state
     
 class PositionalEncoding(nn.Module): 
