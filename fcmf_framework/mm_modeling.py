@@ -552,19 +552,26 @@ class TransformerDecoderBlock(nn.Module):
         self.addnorm2 = AddNorm(HIDDEN_SIZE, ATTENTION_PROBS_DROPOUT_PROB)
         self.ffn = PositionWiseFFN(HIDDEN_SIZE, HIDDEN_SIZE)
         self.add_norm3 = AddNorm(HIDDEN_SIZE, ATTENTION_PROBS_DROPOUT_PROB)
-    def forward(self, X, state):
+    def forward(self, X, state, is_train=True):
         enc_outputs, enc_valid_lens = state[0], state[1]
         if state[2][self.i] is None:
             key_values = X
         else:
             key_values = torch.cat((state[2][self.i], X), dim=1)
             state[2][self.i] = key_values
-        if self.training:
+        if is_train:
             batch_size, num_steps, _ = X.shape
             # Shape of dec_valid_lens: (batch_size, num_steps)
-            dec_valid_lens = torch.arange(1, num_steps + 1, device=X.device).repeat(batch_size, 1)
+            dec_valid_lens = torch.arange(1, num_steps + 1, device=X.device).repeat(batch_size, 1) # In training, no mask 
+            '''
+            For example: if num_steps = 5
+           [[1, 2, 3, 4, 5],  # Batch 1
+            [1, 2, 3, 4, 5],  # Batch 2
+            ...]              # Batch N
+            Model can see all the positions in the current sequence
+            '''
         else:
-            dec_valid_lens = None
+            dec_valid_lens = None # In prediction, masking is done in the attention module
         # Self-attention
         X2 = self.attention1(X, X, dec_valid_lens)
         Y = self.addnorm1(X, X2)
@@ -575,12 +582,12 @@ class TransformerDecoderBlock(nn.Module):
     
 class PositionalEncoding(nn.Module): 
     """Positional encoding."""
-    def __init__(self, max_len=1000):
+    def __init__(self, max_len_decoder): #Pay attention to max length of decoder input because of using positional encoding only at decoder side
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(ATTENTION_PROBS_DROPOUT_PROB)
         # Create a long enough P
-        self.P = torch.zeros((1, max_len, HIDDEN_SIZE))
-        X = torch.arange(max_len, dtype=torch.float32).reshape(
+        self.P = torch.zeros((1, max_len_decoder, HIDDEN_SIZE))
+        X = torch.arange(max_len_decoder, dtype=torch.float32).reshape(
             -1, 1) / torch.pow(10000, torch.arange(
             0, HIDDEN_SIZE, 2, dtype=torch.float32) / HIDDEN_SIZE)
         self.P[:, :, 0::2] = torch.sin(X)
@@ -590,12 +597,12 @@ class PositionalEncoding(nn.Module):
         X = X + self.P[:, :X.shape[1], :].to(X.device)
         return self.dropout(X)
 class IAOGDecoder(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self, vocab_size, max_len_decoder):
         super(IAOGDecoder, self).__init__()
         self.num_hiddens = HIDDEN_SIZE
         self.num_blks = NUM_HIDDEN_LAYERS
         self.embedding = nn.Embedding(vocab_size, self.num_hiddens)
-        self.pos_encoding = PositionalEncoding()
+        self.pos_encoding = PositionalEncoding(max_len_decoder)
         self.blks = nn.Sequential()
         for i in range(NUM_HIDDEN_LAYERS):
             self.blks.add_module('block' + str(i), TransformerDecoderBlock(i))
@@ -604,11 +611,11 @@ class IAOGDecoder(nn.Module):
     def init_state(self, enc_outputs, enc_valid_lens):
         return [enc_outputs, enc_valid_lens, [None] * self.num_blks]
 
-    def forward(self, X, state):
+    def forward(self, X, state, is_train=True):
         X = self.pos_encoding(self.embedding(X) * math.sqrt(self.num_hiddens))
         self._attention_weights = [[None] * len(self.blks) for _ in range (2)]
         for i, blk in enumerate(self.blks):
-            X, state = blk(X, state)
+            X, state = blk(X, state, is_train=is_train)
             # Decoder self-attention weights
             self._attention_weights[0][
                 i] = blk.attention1.attention.attention_weights

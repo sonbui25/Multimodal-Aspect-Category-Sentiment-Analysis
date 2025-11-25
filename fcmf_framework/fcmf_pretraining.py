@@ -14,7 +14,6 @@ class FCMFEncoder(nn.Module):
         self.num_imgs = num_imgs
         self.num_roi = num_roi
         self.bert = FeatureExtractor(pretrained_path)
-        self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
         self.vismap2text = nn.Linear(2048, HIDDEN_SIZE)
         self.roimap2text = nn.Linear(2048, HIDDEN_SIZE)
         self.box_head = BoxMultiHeadedAttention(8,HIDDEN_SIZE)
@@ -22,10 +21,8 @@ class FCMFEncoder(nn.Module):
         self.text2img_attention = BertCrossEncoder()
         self.text2img_pooler = BertPooler()
         self.text2roi_pooler = BertPooler()
-
         self.MultimodalDenoisingEncoder = MultimodalDenoisingEncoder(alpha=alpha)
         self.mm_attention = MultimodalEncoder()
-        self.text_pooler = BertPooler()
 
     def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None):
 
@@ -106,31 +103,27 @@ class FCMFEncoder(nn.Module):
             list_r_i.append(transpose_roi_embed) 
 
         all_h_i_features = torch.cat(list_h_i, dim = 1) # batch_size, num_img, 768
-        all_r_i_features = torch.cat(list_r_i, dim = 1) # batch_size, num_img*num_roi, 768
+        all_r_i_features = torch.cat(list_r_i, dim = 1) # batch_size, num_img, 768
 
-        fusion = torch.cat((sequence_output[:,0,:].unsqueeze(1), all_h_i_features,all_r_i_features),dim=1) # batch_size, 1+num_img+num_img*num_roi, 768
+        fusion = torch.cat((sequence_output[:,0,:].unsqueeze(1), all_h_i_features,all_r_i_features),dim=1) # batch_size, 1+num_img+num_img, 768
     
-        comb_attention_mask = added_attention_mask[:,:self.num_imgs + self.num_imgs + 1]  
+        comb_attention_mask = added_attention_mask[:,:self.num_imgs + self.num_imgs + 1]  #first token of text + first hidden state of each image + first hidden state of each roi arcording to original paper
         extended_attention_mask = comb_attention_mask.unsqueeze(1).unsqueeze(2)
         extended_attention_mask = extended_attention_mask.to(dtype=extended_attention_mask.dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
-        final_multimodal_encoder = self.mm_attention(fusion, extended_attention_mask)
-        final_multimodal_encoder = final_multimodal_encoder[-1]
-        
-        text_output = self.text_pooler(final_multimodal_encoder)
-        pooled_output = self.dropout(text_output)
-    
-        return pooled_output
+        final_multimodal_encoder = self.mm_attention(fusion, extended_attention_mask) # batch_size, num_hidden_layers, 1+num_img+num_img, hidden_dim
+        final_multimodal_encoder = final_multimodal_encoder[-1] # batch_size, 1+num_img+num_img, hidden_dim -> use for Seq2Seq task, use pooled_output for classification task
+            
+        return final_multimodal_encoder
 class FCMFSeq2Seq(nn.Module):
-    def __init__(self, encoder:FCMFEncoder, decoder:IAOGDecoder):
+    def __init__(self, vocab_size, max_len_decoder=20):
         super(FCMFSeq2Seq, self).__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-
-    def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None):
-        fused_representation = self.encoder(
-            input_ids, 
+        self.encoder = FCMFEncoder()
+        self.decoder = IAOGDecoder(vocab_size=vocab_size, max_len_decoder=max_len_decoder)
+    def forward(self, enc_X, dec_X, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None, source_valid_len = None, is_train=True):
+        enc_output_last_layer = self.encoder( #enc_output_last_layer is batch_size, seq_len, hidden_size or final_multimodal_encoder[-1] or encoder_output[-1]
+            enc_X, 
             visual_embeds_att, 
             roi_embeds_att, 
             roi_coors, 
@@ -138,5 +131,6 @@ class FCMFSeq2Seq(nn.Module):
             attention_mask, 
             added_attention_mask
         )
-        logits = self.decoder(fused_representation)
+        dec_state = self.decoder.init_state(enc_output_last_layer, source_valid_len)
+        logits = self.decoder(dec_X, dec_state, is_train=is_train)
         return logits
