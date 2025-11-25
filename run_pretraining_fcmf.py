@@ -59,8 +59,8 @@ def main():
                         help="The input data dir. Should contain train/dev/test json files.")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
-    parser.add_argument("--pretrained_model", default=None, type=str, required=True,
-                        help="Pre-trained model (e.g. xlm-roberta-base).")
+    parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True,
+                        help="Pretrained huggingface model (e.g. xlm-roberta-base).") ##Note pretrained_hf_model is path for model like xlm-roberta-base, not path for iaog pretraining weights
     parser.add_argument('--image_dir', default='../vimacsa/image', help='path to images')
     parser.add_argument('--resnet_label_path', default='/kaggle/input/resnet-output', help='Directory containing resnet label jsons')
     
@@ -146,7 +146,7 @@ def main():
     # ==========================================================================================
     # 2. TOKENIZER & METADATA
     # ==========================================================================================
-    tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
+    tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
     # [CRITICAL] Add special token <iaog>
     tokenizer.add_special_tokens({'additional_special_tokens': ['<iaog>']})
     
@@ -186,7 +186,7 @@ def main():
     # ==========================================================================================
     # 4. INITIALIZE MODEL
     # ==========================================================================================
-    model = FCMFSeq2Seq(vocab_size=len(tokenizer), max_len_decoder=args.max_len_decoder)
+    model = FCMFSeq2Seq(args.pretrained_hf_model, vocab_size=len(tokenizer), max_len_decoder=args.max_len_decoder)
     model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
     model.decoder.embedding = torch.nn.Embedding(len(tokenizer), model.decoder.num_hiddens)
 

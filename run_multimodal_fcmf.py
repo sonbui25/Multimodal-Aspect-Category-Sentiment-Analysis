@@ -66,8 +66,8 @@ def main():
     parser.add_argument('--resnet_label_path', default='/kaggle/input/resnet-output', help='Resnet labels path')
 
     # --- MODEL ARGUMENTS ---
-    parser.add_argument("--pretrained_model", default=None, type=str, required=True,
-                        help="Pre-trained model (e.g. xlm-roberta-base).")
+    parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True,
+                        help="Pre-trained huggingface model and tokenizer (e.g. xlm-roberta-base).")
     
     # [NEW] Load Encoder weights from IAOG Pretraining
     parser.add_argument("--pretrained_iaog_path", default=None, type=str,
@@ -160,7 +160,7 @@ def main():
     # 2. LOAD TOKENIZER & METADATA
     # ==========================================================================================
     try:
-        tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
+        tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
         # [CRITICAL] Add <iaog> token to match the vocab size of the Pretrained Encoder
         # If we don't do this, loading weights will fail due to size mismatch.
         special_tokens = {'additional_special_tokens': ['<iaog>']}
@@ -198,7 +198,7 @@ def main():
     # ==========================================================================================
     # 3. MODEL INITIALIZATION
     # ==========================================================================================
-    model = FCMF(pretrained_path=args.pretrained_model,
+    model = FCMF(pretrained_path=args.pretrained_hf_model,
                  num_labels=args.num_polarity,
                  num_imgs=args.num_imgs,
                  num_roi=args.num_rois,

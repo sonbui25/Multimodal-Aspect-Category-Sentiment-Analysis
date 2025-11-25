@@ -8,12 +8,12 @@ from transformers import AutoModel
 from .mm_modeling import *
 from .roi_modeling import *
 class FCMFEncoder(nn.Module):
-    def __init__(self, pretrained_path, num_labels=4, num_imgs = 7, num_roi = 7, alpha=0.7):
+    def __init__(self, pretrained_hf_path, num_labels=4, num_imgs = 7, num_roi = 7, alpha=0.7):
         super(FCMFEncoder, self).__init__()
         self.num_labels = num_labels
         self.num_imgs = num_imgs
         self.num_roi = num_roi
-        self.bert = FeatureExtractor(pretrained_path)
+        self.bert = FeatureExtractor(pretrained_hf_path)
         self.vismap2text = nn.Linear(2048, HIDDEN_SIZE)
         self.roimap2text = nn.Linear(2048, HIDDEN_SIZE)
         self.box_head = BoxMultiHeadedAttention(8,HIDDEN_SIZE)
@@ -117,9 +117,9 @@ class FCMFEncoder(nn.Module):
             
         return final_multimodal_encoder
 class FCMFSeq2Seq(nn.Module):
-    def __init__(self, vocab_size, max_len_decoder=20):
+    def __init__(self, pretrained_hf_path, vocab_size, max_len_decoder=20): #Note pretrained_hf_path is path for model like xlm-roberta-base, not path for iaog pretraining weights
         super(FCMFSeq2Seq, self).__init__()
-        self.encoder = FCMFEncoder()
+        self.encoder = FCMFEncoder(pretrained_hf_path)
         self.decoder = IAOGDecoder(vocab_size=vocab_size, max_len_decoder=max_len_decoder)
     def forward(self, enc_X, dec_X, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None, source_valid_len = None, is_train=True):
         enc_output_last_layer = self.encoder( #enc_output_last_layer is batch_size, seq_len, hidden_size or final_multimodal_encoder[-1] or encoder_output[-1]
