@@ -296,6 +296,7 @@ def main():
             # --- Train Step ---
             pbar = tqdm(train_dataloader, disable=not master_process)
             for step, batch in enumerate(pbar):
+                pbar.set_description(f"Epoch {epoch}")
                 # 1. Đưa dữ liệu vào Device
                 batch = tuple(t.to(device) for t in batch)
                 (t_img_features, roi_img_features, roi_coors, labels, 
@@ -356,6 +357,11 @@ def main():
 
                 # 4. Optimizer Step (Cập nhật trọng số)
                 if (step + 1) % args.gradient_accumulation_steps == 0:
+                    # Unscale trước khi Clip
+                    if args.fp16:
+                        scaler.unscale_(optimizer) 
+
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     # Bước cập nhật optimizer
                     if args.fp16:
                         scaler.step(optimizer)
@@ -401,7 +407,10 @@ def main():
 
                 avg_val_loss = total_val_loss / len(dev_dataloader)
                 logger.info(f"Dev Loss Epoch {epoch}: {avg_val_loss}")
-
+                # In ra Val Loss và Rouge Scores
+                print(f"***** Epoch {epoch} Eval Results *****")
+                print(f"  Avg Dev Loss = {avg_val_loss}")
+                
                 # Save BEST Checkpoint (Only Master)
                 if avg_val_loss < min_val_loss:
                     min_val_loss = avg_val_loss
