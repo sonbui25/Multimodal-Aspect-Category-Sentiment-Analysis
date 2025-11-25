@@ -199,6 +199,11 @@ def main():
 
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
     roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
+    if not args.fine_tune_cnn:
+        for param in img_res_model.parameters():
+            param.requires_grad = False
+        for param in roi_res_model.parameters():
+            param.requires_grad = False
     resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
     resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
 
