@@ -93,6 +93,8 @@ class IAOGDataset(Dataset):
         
         # Chuẩn hóa nhãn: "Room#Positive" -> "room positive"
         sentiment_aspects = [asp.replace("#", ' ') for asp in iaog_label]
+        if len(sentiment_aspects) == 0: 
+            sentiment_aspects = ['empty']
         joined_sentiment_aspects = ' </s> '.join(sentiment_aspects)
 
         # Tạo chuỗi đích: <iaog> room positive </s> service negative ...
