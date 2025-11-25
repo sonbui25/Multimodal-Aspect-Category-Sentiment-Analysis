@@ -199,11 +199,6 @@ def main():
 
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
     roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
-    if not args.fine_tune_cnn:
-        for param in img_res_model.parameters():
-            param.requires_grad = False
-        for param in roi_res_model.parameters():
-            param.requires_grad = False
     resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
     resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
 
@@ -319,17 +314,18 @@ def main():
                 # 2. Forward & Tính Loss
                 with autocast(enabled=args.fp16):
                     # --- Feature Extraction ---
-                    enc_imgs = []
-                    for i in range(args.num_imgs):
-                        feat = resnet_img(t_img_features[:, i]).view(-1, 2048, 49).permute(0, 2, 1)
-                        enc_imgs.append(feat)
-                    vis_embeds = torch.stack(enc_imgs, dim=1)
+                    with torch.no_grad():
+                        enc_imgs = []
+                        for i in range(args.num_imgs):
+                            feat = resnet_img(t_img_features[:, i]).view(-1, 2048, 49).permute(0, 2, 1)
+                            enc_imgs.append(feat)
+                        vis_embeds = torch.stack(enc_imgs, dim=1)
 
-                    enc_rois = []
-                    for i in range(args.num_imgs):
-                        roi_list = [resnet_roi(roi_img_features[:, i, r]).squeeze(1) for r in range(args.num_rois)]
-                        enc_rois.append(torch.stack(roi_list, dim=1))
-                    roi_embeds = torch.stack(enc_rois, dim=1)
+                        enc_rois = []
+                        for i in range(args.num_imgs):
+                            roi_list = [resnet_roi(roi_img_features[:, i, r]).squeeze(1) for r in range(args.num_rois)]
+                            enc_rois.append(torch.stack(roi_list, dim=1))
+                        roi_embeds = torch.stack(enc_rois, dim=1)
 
                     # --- Model Forward ---
                     logits = model(
