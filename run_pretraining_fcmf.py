@@ -202,7 +202,12 @@ def main():
     resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
 
     model = model.to(device)
-
+    if args.gradient_checkpointing: 
+            # Nếu model được bọc trong DDP/DataParallel, phải truy cập .module
+            if hasattr(model, 'module'):
+                model.module.encoder.bert.cell.gradient_checkpointing_enable()
+            else:
+                model.encoder.bert.cell.gradient_checkpointing_enable()
     # DDP Setup
     if args.ddp:
         model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
@@ -363,8 +368,7 @@ def main():
                         optimizer.step()
                     
                     scheduler.step()
-                    optimizer.zero_grad()
-                    
+                    optimizer.zero_grad(set_to_none=True)                    
                     # Hiển thị Loss thực tế (nhân ngược lại để dễ nhìn)
                     pbar.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
 
