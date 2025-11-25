@@ -124,7 +124,7 @@ class Attention(nn.Module):
             score = score.masked_fill(mask == 0, float('-1e4'))
 
         # debug prints (remove after)
-        print('kx', kx.dtype, 'qx', qx.dtype, 'score pre-softmax anynan', torch.isnan(score).any().item())
+        # print('kx', kx.dtype, 'qx', qx.dtype, 'score pre-softmax anynan', torch.isnan(score).any().item())
 
         score = F.softmax(score, dim=-1)
         self.attention_weights = score
