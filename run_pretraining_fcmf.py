@@ -75,6 +75,7 @@ def main():
     parser.add_argument("--num_rois", default=4, type=int)
     parser.add_argument('--fine_tune_cnn', action='store_true')
     parser.add_argument("--alpha", default=0.8, type=float)
+    parser.add_argument('--gradient_checkpointing', action='store_true')
     # --- TRAINING HYPERPARAMETERS ---
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
