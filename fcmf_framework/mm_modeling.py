@@ -573,10 +573,10 @@ class TransformerDecoderBlock(nn.Module):
         else:
             dec_valid_lens = None # In prediction, masking is done in the attention module
         # Self-attention
-        X2 = self.attention1(X, X, dec_valid_lens)
+        X2, _ = self.attention1(X, X, dec_valid_lens)
         Y = self.addnorm1(X, X2)
         # Encoder-decoder attention
-        Y2 = self.attention2(enc_outputs, Y, enc_valid_lens)
+        Y2, _ = self.attention2(enc_outputs, Y, enc_valid_lens)
         Z = self.addnorm2(Y, Y2)
         return self.add_norm3(Z, self.ffn(Z)), state
     
