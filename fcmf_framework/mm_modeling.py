@@ -100,7 +100,8 @@ class Attention(nn.Module):
 
         if mask is not None:
             score = score.masked_fill(mask == 0, -1e4)
-        
+        print(f"kx: {kx}")
+        print(f"score: {score}")
         score = F.softmax(score, dim=-1)
         
         # [FIX] Lưu weight vào self để truy cập từ bên ngoài
@@ -109,8 +110,7 @@ class Attention(nn.Module):
         output = torch.bmm(score, kx)
         output = torch.cat(torch.split(output, mb_size, dim=0), dim=-1)
         output = self.proj(output)
-        print(f"output: {output}")
-        print(f"score: {score}")
+        
         return output, score
 
 
