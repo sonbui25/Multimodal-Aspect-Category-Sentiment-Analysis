@@ -32,47 +32,64 @@ INITIALIZER_RANGE=0.02
 ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
 
 # for NAACL visual attention part
-class Attention(nn.Module): 
+class Attention(nn.Module):
     def __init__(self, embed_dim, hidden_dim=None, n_head=1, score_function='scaled_dot_product', dropout=0.1):
-        super(Attention, self).__init__()
+        super().__init__()
         if hidden_dim is None:
             hidden_dim = embed_dim // n_head
         self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim
         self.n_head = n_head
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.score_function = score_function
-        self.w_kx = nn.Parameter(torch.FloatTensor(n_head, embed_dim, hidden_dim))
-        self.w_qx = nn.Parameter(torch.FloatTensor(n_head, embed_dim, hidden_dim))
+
+        # learnable projection weights per head (initialized below)
+        self.w_kx = nn.Parameter(torch.empty(n_head, embed_dim, hidden_dim))
+        self.w_qx = nn.Parameter(torch.empty(n_head, embed_dim, hidden_dim))
         self.proj = nn.Linear(n_head * hidden_dim, embed_dim)
         if score_function == 'mlp':
-            self.weight = nn.Parameter(torch.Tensor(hidden_dim * 2, 1))
-        elif self.score_function == 'bi_linear':
-            self.weight = nn.Parameter(torch.Tensor(hidden_dim, hidden_dim))
+            self.weight = nn.Parameter(torch.empty(hidden_dim * 2, 1))
+        elif score_function == 'bi_linear':
+            self.weight = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
         else:
             self.register_parameter('weight', None)
-        
-        # Biến lưu trữ weights để visualize
+
+        # init
+        nn.init.xavier_uniform_(self.w_kx)
+        nn.init.xavier_uniform_(self.w_qx)
+        if self.weight is not None:
+            nn.init.xavier_uniform_(self.weight)
+
+        # store weights for visualization
         self.attention_weights = None
 
-    def forward(self, k, q, memory_len=None):
-        if len(q.shape) == 2: q = torch.unsqueeze(q, dim=1)
-        if len(k.shape) == 2: k = torch.unsqueeze(k, dim=1)
-        
-        mb_size = k.shape[0]
-        k_len = k.shape[1]
-        q_len = q.shape[1]
 
-        kx = k.repeat(self.n_head, 1, 1).view(self.n_head * mb_size, -1, self.embed_dim)
-        kx = torch.bmm(kx, self.w_kx.repeat(mb_size, 1, 1).view(self.n_head * mb_size, self.embed_dim, self.hidden_dim))
-        
-        qx = q.repeat(self.n_head, 1, 1).view(self.n_head * mb_size, -1, self.embed_dim)
-        qx = torch.bmm(qx, self.w_qx.repeat(mb_size, 1, 1).view(self.n_head * mb_size, self.embed_dim, self.hidden_dim))
+    def forward(self, k, q, memory_len=None):
+        if k.dim() == 2:
+            k = k.unsqueeze(1)
+        if q.dim() == 2:
+            q = q.unsqueeze(1)
+
+        mb_size = k.size(0)
+        k_len = k.size(1)
+        q_len = q.size(1)
+        device = k.device
+        dtype = k.dtype
+
+        # project per-head (repeat weights to match batch)
+        kx = k.repeat(self.n_head, 1, 1).view(self.n_head * mb_size, k_len, self.embed_dim)
+        w_k_rep = self.w_kx.repeat(mb_size, 1, 1).view(self.n_head * mb_size, self.embed_dim, self.hidden_dim).to(device=device, dtype=dtype)
+        kx = torch.bmm(kx.to(dtype=dtype), w_k_rep)
+
+        qx = q.repeat(self.n_head, 1, 1).view(self.n_head * mb_size, q_len, self.embed_dim)
+        w_q_rep = self.w_qx.repeat(mb_size, 1, 1).view(self.n_head * mb_size, self.embed_dim, self.hidden_dim).to(device=device, dtype=dtype)
+        qx = torch.bmm(qx.to(dtype=dtype), w_q_rep)
 
         if self.score_function == 'scaled_dot_product':
-            kt = kx.permute(0, 2, 1)
-            qkt = torch.bmm(qx, kt)
-            score = torch.div(qkt, math.sqrt(self.hidden_dim))
+            kt = kx.transpose(1, 2)  # (nh*mb, hidden, k_len)
+            qkt = torch.bmm(qx, kt)   # (nh*mb, q_len, k_len)
+            # divide by sqrt(d_k) using float-safe conversion
+            denom = math.sqrt(self.hidden_dim)
+            score = qkt / denom
         elif self.score_function == 'mlp':
             kxx = torch.unsqueeze(kx, dim=1).expand(-1, q_len, -1, -1)
             qxx = torch.unsqueeze(qx, dim=2).expand(-1, -1, k_len, -1)
@@ -85,32 +102,36 @@ class Attention(nn.Module):
         else:
             raise RuntimeError('invalid score_function')
 
+        # build mask (ensure shapes match score: (nh*mb, q_len, k_len))
         mask = None
         if memory_len is not None:
-            if isinstance(memory_len, torch.Tensor) and memory_len.dim() == 2:
-                casual_mask = torch.tril(torch.ones(q_len, k_len, device=self.device))
-                mask = casual_mask.unsqueeze(0) 
-            elif isinstance(memory_len, (list, tuple, torch.Tensor)):
-                if isinstance(memory_len, list):
-                    memory_len = torch.tensor(memory_len, device=self.device)
-                idx = torch.arange(k_len, device=self.device).unsqueeze(0)
-                mask_b = (idx < memory_len.unsqueeze(1)).float()
-                mask = mask_b.repeat(self.n_head, 1) 
-                mask = mask.unsqueeze(1)
+            if isinstance(memory_len, (list, tuple)):
+                memory_len = torch.tensor(memory_len, device=device)
+            if isinstance(memory_len, torch.Tensor) and memory_len.dim() == 1:
+                # create per-batch mask and repeat for heads
+                idx = torch.arange(k_len, device=device).unsqueeze(0)  # (1, k_len)
+                mask_b = (idx < memory_len.unsqueeze(1)).float()      # (mb, k_len)
+                mask = mask_b.unsqueeze(1).repeat(self.n_head, 1, 1)  # (nh*mb, 1, k_len) -> later broadcast
+            elif isinstance(memory_len, torch.Tensor) and memory_len.dim() == 2:
+                # casual_mask case
+                casual_mask = torch.tril(torch.ones(q_len, k_len, device=device))
+                mask = casual_mask.unsqueeze(0)  # shape (1, q_len, k_len)
 
         if mask is not None:
-            score = score.masked_fill(mask == 0, -1e4)
-        print(f"kx: {kx}")
-        print(f"score: {score}")
+            # ensure mask broadcast to (nh*mb, q_len, k_len)
+            if mask.dim() == 3 and mask.size(0) == 1:
+                mask = mask.repeat(self.n_head * mb_size, 1, 1)
+            score = score.masked_fill(mask == 0, float('-1e4'))
+
+        # debug prints (remove after)
+        print('kx', kx.dtype, 'qx', qx.dtype, 'score pre-softmax anynan', torch.isnan(score).any().item())
+
         score = F.softmax(score, dim=-1)
-        
-        # [FIX] Lưu weight vào self để truy cập từ bên ngoài
         self.attention_weights = score
-        
-        output = torch.bmm(score, kx)
-        output = torch.cat(torch.split(output, mb_size, dim=0), dim=-1)
+
+        output = torch.bmm(score, kx)  # (nh*mb, q_len, hidden_dim)
+        output = torch.cat(torch.split(output, mb_size, dim=0), dim=-1)  # (mb, q_len, nh*hidden)
         output = self.proj(output)
-        
         return output, score
 
 
