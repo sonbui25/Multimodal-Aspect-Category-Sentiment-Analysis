@@ -621,7 +621,7 @@ class IAOGDecoder(nn.Module):
             self._attention_weights[0][i] = blk.attention1.attention_weights
             self._attention_weights[1][i] = blk.attention2.attention_weights
             
-        return self.dense(X), state
+        return self.dense(X) #,state
 
     @property
     def attention_weights(self):
