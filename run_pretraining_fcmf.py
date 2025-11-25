@@ -335,10 +335,10 @@ def main():
                     )
                     
                     # --- Tính Loss ---
-                    print(f"Check logits shape: {logits.shape}")
-                    print(f"Check logits sample: {logits}")
-                    print(f"Check labels shape: {labels.view(-1).shape}")
-                    print(f"Check labels sample: {labels.view(-1)}\n\n")
+                    # print(f"Check logits shape: {logits.shape}")
+                    # print(f"Check logits sample: {logits}")
+                    # print(f"Check labels shape: {labels.view(-1).shape}")
+                    # print(f"Check labels sample: {labels.view(-1)}\n\n")
                     loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
                     
                     # Chia nhỏ loss nếu dùng Gradient Accumulation
