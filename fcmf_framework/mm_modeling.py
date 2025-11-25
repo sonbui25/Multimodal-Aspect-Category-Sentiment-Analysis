@@ -32,14 +32,8 @@ INITIALIZER_RANGE=0.02
 ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
 
 # for NAACL visual attention part
-class Attention(nn.Module): #1
+class Attention(nn.Module): 
     def __init__(self, embed_dim, hidden_dim=None, n_head=1, score_function='scaled_dot_product', dropout=0.1):
-        ''' Attention Mechanism
-        :param embed_dim:
-        :param hidden_dim:
-        :param n_head: num of head (Multi-Head Attention)
-        :param score_function: scaled_dot_product / mlp (concat) / bi_linear (general dot)
-        '''
         super(Attention, self).__init__()
         if hidden_dim is None:
             hidden_dim = embed_dim // n_head
@@ -58,32 +52,32 @@ class Attention(nn.Module): #1
         else:
             self.register_parameter('weight', None)
 
-    def forward(self, k, q, memory_len):
-        if len(q.shape) == 2:  # q_len missing
-            q = torch.unsqueeze(q, dim=1)
-        if len(k.shape) == 2:  # k_len missing
-            k = torch.unsqueeze(k, dim=1)
-        mb_size = k.shape[0]  # ?
+    def forward(self, k, q, memory_len=None):
+        if len(q.shape) == 2: q = torch.unsqueeze(q, dim=1)
+        if len(k.shape) == 2: k = torch.unsqueeze(k, dim=1)
+        
+        mb_size = k.shape[0]
         k_len = k.shape[1]
         q_len = q.shape[1]
-        # k: (?, k_len, embed_dim,)
-        # q: (?, q_len, embed_dim,)
-        # kx: (n_head, ?*k_len, embed_dim) -> (n_head*?, k_len, hidden_dim)
-        # qx: (n_head, ?*q_len, embed_dim) -> (n_head*?, q_len, hidden_dim)
-        # score: (n_head*?, q_len, k_len,)
-        # output: (?, q_len, embed_dim,)
-        kx = k.repeat(self.n_head, 1, 1).view(self.n_head, -1, self.embed_dim)  # (n_head, ?*k_len, embed_dim)
-        qx = q.repeat(self.n_head, 1, 1).view(self.n_head, -1, self.embed_dim)  # (n_head, ?*q_len, embed_dim)
-        kx = torch.bmm(kx, self.w_kx).view(-1, k_len, self.hidden_dim)  # (n_head*?, k_len, hidden_dim)
-        qx = torch.bmm(qx, self.w_qx).view(-1, q_len, self.hidden_dim)  # (n_head*?, q_len, hidden_dim)
+
+        # Linear projection
+        # k: (B, K, D) -> repeat -> (H*B, K, D) -> bmm -> (H*B, K, H_dim)
+        kx = k.repeat(self.n_head, 1, 1).view(self.n_head * mb_size, -1, self.embed_dim)
+        kx = torch.bmm(kx, self.w_kx.repeat(mb_size, 1, 1).view(self.n_head * mb_size, self.embed_dim, self.hidden_dim))
+        
+        qx = q.repeat(self.n_head, 1, 1).view(self.n_head * mb_size, -1, self.embed_dim)
+        qx = torch.bmm(qx, self.w_qx.repeat(mb_size, 1, 1).view(self.n_head * mb_size, self.embed_dim, self.hidden_dim))
+
+        # Score calculation
         if self.score_function == 'scaled_dot_product':
             kt = kx.permute(0, 2, 1)
             qkt = torch.bmm(qx, kt)
             score = torch.div(qkt, math.sqrt(self.hidden_dim))
         elif self.score_function == 'mlp':
+            # (Simplified for compatibility)
             kxx = torch.unsqueeze(kx, dim=1).expand(-1, q_len, -1, -1)
             qxx = torch.unsqueeze(qx, dim=2).expand(-1, -1, k_len, -1)
-            kq = torch.cat((kxx, qxx), dim=-1)  # (n_head*?, q_len, k_len, hidden_dim*2)
+            kq = torch.cat((kxx, qxx), dim=-1)
             score = torch.tanh(torch.matmul(kq, self.weight).squeeze(dim=-1))
         elif self.score_function == 'bi_linear':
             qw = torch.matmul(qx, self.weight)
@@ -91,28 +85,53 @@ class Attention(nn.Module): #1
             score = torch.tanh(torch.bmm(qw, kt))
         else:
             raise RuntimeError('invalid score_function')
+
+        # --- [FIXED] MASKING LOGIC ---
+        # Score shape: (n_head * batch, q_len, k_len)
+        
+        mask = None
+        if memory_len is not None:
+            if isinstance(memory_len, torch.Tensor) and memory_len.dim() == 2:
+                # CAUSAL MASK (cho Decoder Self-Attention)
+                # memory_len shape (B, T) -> Tạo mask tam giác
+                # Chỉ giữ lại phần tử i <= j (hoặc ngược lại tùy logic)
+                # Ở đây ta muốn vị trí q_i chỉ nhìn thấy k_0...k_i
+                casual_mask = torch.tril(torch.ones(q_len, k_len, device=self.device))
+                mask = casual_mask.unsqueeze(0) # (1, Q, K) - Broadcast cho Batch*Head
+                
+            elif isinstance(memory_len, (list, tuple, torch.Tensor)):
+                # PADDING MASK (cho Cross Attention)
+                # memory_len shape (B,) chứa độ dài thật
+                if isinstance(memory_len, list):
+                    memory_len = torch.tensor(memory_len, device=self.device)
+                
+                # Tạo mask (B, K)
+                # mask[b, k] = 1 nếu k < memory_len[b] else 0
+                idx = torch.arange(k_len, device=self.device).unsqueeze(0)
+                mask_b = (idx < memory_len.unsqueeze(1)).float() # (B, K)
+                
+                # Repeat cho Heads: (B, K) -> (H*B, K)
+                # Lưu ý: layout của score là [Head1_B1, Head1_B2... Head2_B1...]
+                # k.repeat(n_head, 1, 1) tạo layout [H1_Ball, H2_Ball...]
+                mask = mask_b.repeat(self.n_head, 1) # (H*B, K)
+                mask = mask.unsqueeze(1) # (H*B, 1, K) để broadcast qua Q
+
+        # Apply Mask & Softmax
+        if mask is not None:
+            # Dùng kỹ thuật chuẩn: Gán -inf cho vị trí mask=0 rồi softmax
+            # Nhưng để tương thích code cũ (softmax -> mul -> div), ta giữ nguyên logic "Masked Softmax"
+            # Tuy nhiên, cách cũ không ổn định. Ta đổi sang cách chuẩn:
+            score = score.masked_fill(mask == 0, -1e9)
+        
         score = F.softmax(score, dim=-1)
-        attentions = torch.squeeze(score, dim=1)
-        # print(attentions[:2])
-        # create mask based on the sentence lengths
-        mask = Variable(torch.ones(attentions.size())).to(self.device)
-        for i, l in enumerate(memory_len):
-            if l < k_len:
-                mask[i, l:] = 0
-        # apply mask and renormalize attention scores (weights)
-        masked = attentions * mask
-        # print(masked[:2])
-        # print(masked.shape)
-        _sums = masked.sum(-1)  # sums per row
-        attentions = torch.div(masked, _sums.view(_sums.size(0), 1))
-        # print(attentions[:2])
-
-        score = torch.unsqueeze(attentions, dim=1)
-
+        # Không cần re-normalize thủ công nữa vì softmax đã làm rồi
+        
         output = torch.bmm(score, kx)  # (n_head*?, k_len, hidden_dim)
         output = torch.cat(torch.split(output, mb_size, dim=0), dim=-1)  # (?, k_len, n_head*hidden_dim)
         output = self.proj(output)  # (?, k_len, embed_dim)
-        return output, score.squeeze(-1)
+        
+        # Trả về output và score (score cần reshape về B, H, Q, K nếu muốn visualize)
+        return output, score
 
 
 # class SelfAttention(Attention): #1
