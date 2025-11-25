@@ -487,9 +487,9 @@ class MultimodalDenoisingEncoder(nn.Module):
         # ==================================================================
         max_sim_vals, assignment_indices = torch.max(similarity_matrix, dim=-1)
 
-        # [QUAN TRỌNG] Chặn giá trị trần. Với FP16, exp(88) sẽ gây tràn số.
+        # [QUAN TRỌNG] Chặn giá trị trần. Với FP16, exp(88) sẽ gây trà  n số.
         # Clamp về max=10 hoặc 20 là đủ để Softmax hoạt động tốt mà không gây NaN.
-        #max_sim_vals = torch.clamp(max_sim_vals, max=10.0) 
+        max_sim_vals = torch.clamp(max_sim_vals, max=10.0) 
 
         e_val = math.e
         exp_S = torch.exp(max_sim_vals)
