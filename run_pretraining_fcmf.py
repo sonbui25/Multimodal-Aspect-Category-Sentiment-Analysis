@@ -55,6 +55,8 @@ def main():
     # --- INPUT/OUTPUT PATHS ---
     parser.add_argument("--data_dir", default='../vimacsa', type=str, required=True,
                         help="The input data dir. Should contain train/dev/test json files.")
+    parser.add_argument("--pretrained_data_dir", default='../iaog-pretraining', type=str, required=True,
+                        help="The input data dir. Should contain train/dev/test json files.")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--pretrained_model", default=None, type=str, required=True,
@@ -166,8 +168,8 @@ def main():
     # 3. PREPARE DATASETS
     # ==========================================================================================
     if args.do_train:
-        train_data = pd.read_json(f'{args.data_dir}/train_with_iaog.json')
-        dev_data = pd.read_json(f'{args.data_dir}/dev_with_iaog.json')
+        train_data = pd.read_json(f'{args.pretrained_data_dir}/train_with_iaog.json')
+        dev_data = pd.read_json(f'{args.pretrained_data_dir}/dev_with_iaog.json')
         
         train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
@@ -390,7 +392,7 @@ def main():
         
         # 8.1 Load Test Data
         try:
-            test_data = pd.read_json(f'{args.data_dir}/test_with_iaog.json')
+            test_data = pd.read_json(f'{args.pretrained_data_dir}/test_with_iaog.json')
             test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
             test_dataset = IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, 
                                        args.num_imgs, args.num_rois, args.max_len_decoder)
