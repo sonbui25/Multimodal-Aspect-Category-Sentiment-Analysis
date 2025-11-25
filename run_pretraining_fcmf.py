@@ -335,9 +335,8 @@ def main():
                     )
                     
                     # --- Tính Loss ---
-                    a = logits.view(-1, logits.size(-1))
-                    print(f"Check logits shape: {a.shape}")
-                    print(f"Check logits sample: {a}")
+                    print(f"Check logits shape: {logits.shape}")
+                    print(f"Check logits sample: {logits}")
                     print(f"Check labels shape: {labels.view(-1).shape}")
                     print(f"Check labels sample: {labels.view(-1)}\n\n")
                     loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
