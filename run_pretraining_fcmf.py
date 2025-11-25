@@ -296,25 +296,33 @@ def main():
             # --- Train Step ---
             pbar = tqdm(train_dataloader, disable=not master_process)
             for step, batch in enumerate(pbar):
+                # 1. Đưa dữ liệu vào Device
                 batch = tuple(t.to(device) for t in batch)
-                (t_img_feat, roi_img_feat, roi_coors, labels, dec_input_ids, _, 
-                 enc_input_ids, enc_type_ids, enc_mask, added_mask, valid_lens) = batch
+                (t_img_features, roi_img_features, roi_coors, labels, 
+                dec_input_ids, dec_attn_mask, 
+                enc_input_ids, enc_type_ids, enc_attn_mask, 
+                added_attn_mask, valid_lens) = batch
 
-                with autocast(enabled=args.fp16):
-                    # Feature Extract
-                    enc_imgs = []
-                    for i in range(args.num_imgs):
-                        feat = resnet_img(t_img_feat[:, i]).view(-1, 2048, 49).permute(0, 2, 1)
-                        enc_imgs.append(feat)
-                    vis_embeds = torch.stack(enc_imgs, dim=1)
+                roi_img_features = roi_img_features.float()
 
-                    enc_rois = []
-                    for i in range(args.num_imgs):
-                        roi_list = [resnet_roi(roi_img_feat[:, i, r]).squeeze(1) for r in range(args.num_rois)]
-                        enc_rois.append(torch.stack(roi_list, dim=1))
-                    roi_embeds = torch.stack(enc_rois, dim=1)
+                # 2. Forward & Tính Loss
+                # Sử dụng autocast cho FP16
+                with torch.cuda.amp.autocast(enabled=args.fp16):
+                    # --- Feature Extraction (CNN) ---
+                    # Phần này giữ nguyên logic extract feature từ ResNet
+                    encoded_img = []
+                    for img_idx in range(args.num_imgs):
+                        img_f = resnet_img(t_img_features[:, img_idx, :]).view(-1, 2048, 49).permute(0, 2, 1)
+                        encoded_img.append(img_f)
+                    vis_embeds = torch.stack(encoded_img, dim=1)
 
-                    # Forward
+                    encoded_roi = []
+                    for img_idx in range(args.num_imgs):
+                        roi_list = [resnet_roi(roi_img_features[:, img_idx, r, :]).squeeze(1) for r in range(args.num_rois)]
+                        encoded_roi.append(torch.stack(roi_list, dim=1))
+                    roi_embeds = torch.stack(encoded_roi, dim=1)
+
+                    # --- Model Forward ---
                     logits = model(
                         enc_X=enc_input_ids,
                         dec_X=dec_input_ids,
@@ -322,26 +330,55 @@ def main():
                         roi_embeds_att=roi_embeds,
                         roi_coors=roi_coors,
                         token_type_ids=enc_type_ids,
-                        attention_mask=enc_mask,
-                        added_attention_mask=added_mask,
+                        attention_mask=enc_attn_mask,
+                        added_attention_mask=added_attn_mask,
                         source_valid_len=valid_lens,
                         is_train=True
                     )
-                    
+
+                    # --- Tính Loss ---
+                    # Flatten logits và labels để tính CrossEntropy
+                    # Logits: [Batch, Seq_Len, Vocab] -> [Batch*Seq_Len, Vocab]
+                    # Labels: [Batch, Seq_Len] -> [Batch*Seq_Len]
                     loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+
+                    # [QUAN TRỌNG] Chia Loss cho Gradient Accumulation Steps NGAY LẬP TỨC
                     if args.gradient_accumulation_steps > 1:
                         loss = loss / args.gradient_accumulation_steps
 
-                # Backward
-                scaler.scale(loss).backward() if args.fp16 else loss.backward()
-                train_loss += loss.item()
+                # 3. Backward (Lan truyền ngược)
+                if args.fp16:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
+                train_loss += loss.item() # Cộng dồn để log ra màn hình (Lưu ý: loss này đã được chia nhỏ)
+
+                # 4. Optimizer Step (Chỉ chạy khi đủ số bước tích lũy)
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    scaler.step(optimizer) if args.fp16 else optimizer.step()
-                    if args.fp16: scaler.update()
+                    
+                    # [FIX NaN] Unscale trước khi clip grad (Bắt buộc với FP16)
+                    if args.fp16:
+                        scaler.unscale_(optimizer)
+
+                    # Cắt Gradient để chống bùng nổ (Exploding Gradient)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    if args.fine_tune_cnn:
+                        torch.nn.utils.clip_grad_norm_(resnet_img.parameters(), 1.0)
+                        torch.nn.utils.clip_grad_norm_(resnet_roi.parameters(), 1.0)
+
+                    # Cập nhật trọng số
+                    if args.fp16:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+
                     scheduler.step()
                     optimizer.zero_grad()
-                    pbar.set_postfix(loss=loss.item())
+                    
+                    # Update Progress Bar
+                    pbar.set_postfix(loss=loss.item() * args.gradient_accumulation_steps) # Nhân lại để hiển thị loss thực tế cho dễ nhìn
 
             # --- Eval Step (After each Epoch) ---
             if master_process and args.do_eval:
