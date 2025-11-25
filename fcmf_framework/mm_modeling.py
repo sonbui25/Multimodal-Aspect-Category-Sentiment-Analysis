@@ -121,7 +121,7 @@ class Attention(nn.Module):
             # Dùng kỹ thuật chuẩn: Gán -inf cho vị trí mask=0 rồi softmax
             # Nhưng để tương thích code cũ (softmax -> mul -> div), ta giữ nguyên logic "Masked Softmax"
             # Tuy nhiên, cách cũ không ổn định. Ta đổi sang cách chuẩn:
-            score = score.masked_fill(mask == 0, -1e9)
+            score = score.masked_fill(mask == 0, -1e4)
         
         score = F.softmax(score, dim=-1)
         # Không cần re-normalize thủ công nữa vì softmax đã làm rồi
