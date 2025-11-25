@@ -474,19 +474,27 @@ class MultimodalDenoisingEncoder(nn.Module):
         v_weak = gather(image_hidden_states, idx_weak)
 
         # ==================================================================
-        # 3. Cosine Similarity
+        # 3. Cosine Similarity (SỬA LẠI ĐỂ TRÁNH NAN)
         # ==================================================================
-        v_strong_norm = F.normalize(v_strong, p=2, dim=-1)
-        v_weak_norm = F.normalize(v_weak, p=2, dim=-1)
+        # Thêm eps=1e-6 để tránh chia cho 0 nếu vector toàn số 0 (padding)
+        v_strong_norm = F.normalize(v_strong, p=2, dim=-1, eps=1e-6) 
+        v_weak_norm = F.normalize(v_weak, p=2, dim=-1, eps=1e-6)
+        
         similarity_matrix = torch.matmul(v_weak_norm, v_strong_norm.transpose(-1, -2))
 
         # ==================================================================
-        # 4. Theta & Assignment
+        # 4. Theta & Assignment (SỬA LẠI ĐỂ TRÁNH OVERFLOW FP16)
         # ==================================================================
         max_sim_vals, assignment_indices = torch.max(similarity_matrix, dim=-1)
 
+        # [QUAN TRỌNG] Chặn giá trị trần. Với FP16, exp(88) sẽ gây tràn số.
+        # Clamp về max=10 hoặc 20 là đủ để Softmax hoạt động tốt mà không gây NaN.
+        #max_sim_vals = torch.clamp(max_sim_vals, max=10.0) 
+
         e_val = math.e
         exp_S = torch.exp(max_sim_vals)
+        
+        # Thêm e_val dưới mẫu số để tránh chia cho 0
         theta_weak = exp_S / (exp_S + e_val)
 
         # ==================================================================
