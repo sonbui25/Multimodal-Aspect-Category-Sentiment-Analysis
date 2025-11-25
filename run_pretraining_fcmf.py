@@ -84,7 +84,6 @@ def main():
     parser.add_argument("--learning_rate", default=3e-5, type=float)
     parser.add_argument("--num_train_epochs", default=8.0, type=float)
     parser.add_argument("--warmup_proportion", default=0.1, type=float)
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--fp16', action='store_true')
     
@@ -203,12 +202,7 @@ def main():
     resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
 
     model = model.to(device)
-    if args.gradient_checkpointing: 
-            # Nếu model được bọc trong DDP/DataParallel, phải truy cập .module
-            if hasattr(model, 'module'):
-                model.module.encoder.bert.cell.gradient_checkpointing_enable()
-            else:
-                model.encoder.bert.cell.gradient_checkpointing_enable()
+
     # DDP Setup
     if args.ddp:
         model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
@@ -370,7 +364,7 @@ def main():
                         optimizer.step()
                     
                     scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)                    
+                    optimizer.zero_grad()                    
                     # Hiển thị Loss thực tế (nhân ngược lại để dễ nhìn)
                     pbar.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
 
