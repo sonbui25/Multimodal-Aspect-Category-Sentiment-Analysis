@@ -612,7 +612,7 @@ class IAOGDecoder(nn.Module):
         return [enc_outputs, enc_valid_lens, [None] * self.num_blks]
 
     def forward(self, X, state, is_train=True):
-        X = self.embedding(X)* math.sqrt(self.num_hiddens) + self.pos_encoding(X) 
+        X = self.pos_encoding(self.embedding(X) * math.sqrt(self.num_hiddens))
         print(f"Decoder hidden state sample: {X}\n\n")
         # Init storage for weights (nếu cần visualize)
         self._attention_weights = [[None] * len(self.blks) for _ in range (2)]
