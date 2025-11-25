@@ -73,7 +73,6 @@ class Attention(nn.Module):
             kt = kx.permute(0, 2, 1)
             qkt = torch.bmm(qx, kt)
             score = torch.div(qkt, math.sqrt(self.hidden_dim))
-            score = torch.clamp(score, min=-50, max=50)
         elif self.score_function == 'mlp':
             kxx = torch.unsqueeze(kx, dim=1).expand(-1, q_len, -1, -1)
             qxx = torch.unsqueeze(qx, dim=2).expand(-1, -1, k_len, -1)
@@ -621,7 +620,8 @@ class IAOGDecoder(nn.Module):
             # [FIX] Truy cập trực tiếp vào .attention_weights thay vì .attention.attention_weights
             self._attention_weights[0][i] = blk.attention1.attention_weights
             self._attention_weights[1][i] = blk.attention2.attention_weights
-            
+        print(f"Decoder final hidden state shape: {X.shape}")
+        print(f"Decoder final hidden state sample: {X}\n\n")
         return self.dense(X) #,state
 
     @property
