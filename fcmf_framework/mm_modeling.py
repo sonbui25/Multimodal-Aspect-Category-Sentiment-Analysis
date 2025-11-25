@@ -618,7 +618,7 @@ class IAOGDecoder(nn.Module):
         
         for i, blk in enumerate(self.blks):
             X, state = blk(X, state, is_train=is_train)
-            print(f"Decoder hidden state sample: {X}\n\n")
+            print(f"Decoder hidden state sample {i}: {X}\n\n")
             # [FIX] Truy cập trực tiếp vào .attention_weights thay vì .attention.attention_weights
             self._attention_weights[0][i] = blk.attention1.attention_weights
             self._attention_weights[1][i] = blk.attention2.attention_weights
