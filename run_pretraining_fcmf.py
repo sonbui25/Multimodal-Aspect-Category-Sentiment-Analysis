@@ -299,28 +299,26 @@ def main():
                 # 1. Đưa dữ liệu vào Device
                 batch = tuple(t.to(device) for t in batch)
                 (t_img_features, roi_img_features, roi_coors, labels, 
-                dec_input_ids, dec_attn_mask, 
-                enc_input_ids, enc_type_ids, enc_attn_mask, 
-                added_attn_mask, valid_lens) = batch
+                 dec_input_ids, dec_attn_mask, 
+                 enc_input_ids, enc_type_ids, enc_attn_mask, 
+                 added_attn_mask, valid_lens) = batch
 
                 roi_img_features = roi_img_features.float()
 
                 # 2. Forward & Tính Loss
-                # Sử dụng autocast cho FP16
-                with torch.cuda.amp.autocast(enabled=args.fp16):
-                    # --- Feature Extraction (CNN) ---
-                    # Phần này giữ nguyên logic extract feature từ ResNet
-                    encoded_img = []
-                    for img_idx in range(args.num_imgs):
-                        img_f = resnet_img(t_img_features[:, img_idx, :]).view(-1, 2048, 49).permute(0, 2, 1)
-                        encoded_img.append(img_f)
-                    vis_embeds = torch.stack(encoded_img, dim=1)
+                with autocast(enabled=args.fp16):
+                    # --- Feature Extraction ---
+                    enc_imgs = []
+                    for i in range(args.num_imgs):
+                        feat = resnet_img(t_img_features[:, i]).view(-1, 2048, 49).permute(0, 2, 1)
+                        enc_imgs.append(feat)
+                    vis_embeds = torch.stack(enc_imgs, dim=1)
 
-                    encoded_roi = []
-                    for img_idx in range(args.num_imgs):
-                        roi_list = [resnet_roi(roi_img_features[:, img_idx, r, :]).squeeze(1) for r in range(args.num_rois)]
-                        encoded_roi.append(torch.stack(roi_list, dim=1))
-                    roi_embeds = torch.stack(encoded_roi, dim=1)
+                    enc_rois = []
+                    for i in range(args.num_imgs):
+                        roi_list = [resnet_roi(roi_img_features[:, i, r]).squeeze(1) for r in range(args.num_rois)]
+                        enc_rois.append(torch.stack(roi_list, dim=1))
+                    roi_embeds = torch.stack(enc_rois, dim=1)
 
                     # --- Model Forward ---
                     logits = model(
@@ -335,14 +333,11 @@ def main():
                         source_valid_len=valid_lens,
                         is_train=True
                     )
-
+                    
                     # --- Tính Loss ---
-                    # Flatten logits và labels để tính CrossEntropy
-                    # Logits: [Batch, Seq_Len, Vocab] -> [Batch*Seq_Len, Vocab]
-                    # Labels: [Batch, Seq_Len] -> [Batch*Seq_Len]
                     loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-
-                    # [QUAN TRỌNG] Chia Loss cho Gradient Accumulation Steps NGAY LẬP TỨC
+                    
+                    # Chia nhỏ loss nếu dùng Gradient Accumulation
                     if args.gradient_accumulation_steps > 1:
                         loss = loss / args.gradient_accumulation_steps
 
@@ -352,33 +347,34 @@ def main():
                 else:
                     loss.backward()
 
-                train_loss += loss.item() # Cộng dồn để log ra màn hình (Lưu ý: loss này đã được chia nhỏ)
+                train_loss += loss.item()
 
-                # 4. Optimizer Step (Chỉ chạy khi đủ số bước tích lũy)
+                # 4. Optimizer Step (Cập nhật trọng số)
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    
-                    # [FIX NaN] Unscale trước khi clip grad (Bắt buộc với FP16)
+                    # [QUAN TRỌNG] Unscale trước khi Clip Gradient để tránh lỗi NaN
                     if args.fp16:
                         scaler.unscale_(optimizer)
 
-                    # Cắt Gradient để chống bùng nổ (Exploding Gradient)
+                    # [QUAN TRỌNG] Cắt Gradient để tránh bùng nổ (Exploding Gradient)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    
+                    # Nếu fine-tune CNN thì cũng phải clip gradient cho nó
                     if args.fine_tune_cnn:
                         torch.nn.utils.clip_grad_norm_(resnet_img.parameters(), 1.0)
                         torch.nn.utils.clip_grad_norm_(resnet_roi.parameters(), 1.0)
 
-                    # Cập nhật trọng số
+                    # Bước cập nhật optimizer
                     if args.fp16:
                         scaler.step(optimizer)
                         scaler.update()
                     else:
                         optimizer.step()
-
+                    
                     scheduler.step()
                     optimizer.zero_grad()
                     
-                    # Update Progress Bar
-                    pbar.set_postfix(loss=loss.item() * args.gradient_accumulation_steps) # Nhân lại để hiển thị loss thực tế cho dễ nhìn
+                    # Hiển thị Loss thực tế (nhân ngược lại để dễ nhìn)
+                    pbar.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
 
             # --- Eval Step (After each Epoch) ---
             if master_process and args.do_eval:
