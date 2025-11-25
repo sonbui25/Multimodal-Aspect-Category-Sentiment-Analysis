@@ -355,18 +355,6 @@ def main():
 
                 # 4. Optimizer Step (Cập nhật trọng số)
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    # [QUAN TRỌNG] Unscale trước khi Clip Gradient để tránh lỗi NaN
-                    if args.fp16:
-                        scaler.unscale_(optimizer)
-
-                    # [QUAN TRỌNG] Cắt Gradient để tránh bùng nổ (Exploding Gradient)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    
-                    # Nếu fine-tune CNN thì cũng phải clip gradient cho nó
-                    if args.fine_tune_cnn:
-                        torch.nn.utils.clip_grad_norm_(resnet_img.parameters(), 1.0)
-                        torch.nn.utils.clip_grad_norm_(resnet_roi.parameters(), 1.0)
-
                     # Bước cập nhật optimizer
                     if args.fp16:
                         scaler.step(optimizer)
