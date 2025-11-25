@@ -99,7 +99,7 @@ class Attention(nn.Module):
                 mask = mask.unsqueeze(1)
 
         if mask is not None:
-            score = score.masked_fill(mask == 0, -1e9)
+            score = score.masked_fill(mask == 0, -1e4)
         
         score = F.softmax(score, dim=-1)
         
