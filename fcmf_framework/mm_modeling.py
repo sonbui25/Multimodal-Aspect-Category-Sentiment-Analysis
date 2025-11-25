@@ -592,7 +592,9 @@ class PositionalEncoding(nn.Module):
         self.P[:, :, 1::2] = torch.cos(X)
 
     def forward(self, X):
-        X = X + self.P[:, :X.shape[1], :].to(X.device)
+        pe = self.P[:, :X.size(1), :].to(device=X.device).type_as(X)
+    
+        X = X + pe
         return self.dropout(X)
 class IAOGDecoder(nn.Module):
     def __init__(self, vocab_size, max_len_decoder):
@@ -600,7 +602,7 @@ class IAOGDecoder(nn.Module):
         self.num_hiddens = HIDDEN_SIZE
         self.num_blks = NUM_HIDDEN_LAYERS
         self.embedding = nn.Embedding(vocab_size, self.num_hiddens)
-        self.pos_encoding = PositionalEncoding(max_len_decoder)
+        self.pos_encoding = PositionalEncoding(max_len_decoder=max_len_decoder)
         self.blks = nn.Sequential()
         for i in range(NUM_HIDDEN_LAYERS):
             self.blks.add_module('block' + str(i), TransformerDecoderBlock(i))
