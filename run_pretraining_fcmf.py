@@ -122,17 +122,34 @@ def main():
         if not os.path.exists(args.output_dir):
             os.makedirs(args.output_dir)
         
-        logging.basicConfig(
-            format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-            datefmt='%m/%d/%Y %H:%M:%S',
-            level=logging.INFO,
-            handlers=[
-                logging.FileHandler(f"{args.output_dir}/training_iaog.log"),
-                logging.StreamHandler()
-            ]
-        )
+        # --- THAY THẾ ĐOẠN logging.basicConfig CŨ BẰNG ĐOẠN NÀY ---
+        print("===================== RUN Pre-training IAOG =====================")
+        
+        # 1. Tạo Logger
         logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        
+        # 2. Tạo Formatter (Định dạng giờ giấc, nội dung)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S')
+        
+        # 3. Tạo File Handler (Ghi vào file)
+        file_handler = logging.FileHandler(f'{args.output_dir}/training_iaog.log')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        # 4. Tạo Console Handler (In ra màn hình) <--- CÁI BẠN CẦN
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
         logger.info(f"Arguments: {args}")
+        logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
+            device, ddp_world_size, bool(args.ddp), args.fp16))
+        
+    else:
+        # Các process phụ không cần log (hoặc chỉ log lỗi)
+        logger = logging.getLogger(__name__)
+        logger.addHandler(logging.NullHandler())
 
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
     
@@ -527,16 +544,15 @@ def main():
         logger.info(f"ROUGE-1: {avg_r1}")
         logger.info(f"ROUGE-2: {avg_r2}")
         logger.info(f"ROUGE-L: {avg_rl}")
-        
+
         with open(f"{args.output_dir}/test_results_iaog.txt", "w") as f:
             f.write(f"Test Loss: {avg_test_loss}\n")
             f.write(f"ROUGE-1: {avg_r1}\n")
             f.write(f"ROUGE-2: {avg_r2}\n")
             f.write(f"ROUGE-L: {avg_rl}\n")
-            
             f.write("\n--- Sample Predictions ---\n")
-            for i in range(min(5, len(all_preds))):
-                f.write(f"Pred: {all_preds[i]}\nRef : {all_labels[i]}\n\n")
+            for i in range(len(all_preds)):
+                f.write(f"Pred: {all_preds[i]}\nLabel : {all_labels[i]}\n\n")
 
 if __name__ == '__main__':
     main()

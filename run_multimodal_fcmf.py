@@ -304,8 +304,8 @@ def main():
                 encoder_state_dict[k] = v
         
         # Load into current model (strict=False to ignore classifier/pooler mismatch)
-        model_to_load = model.module if hasattr(model, 'module') else model
-        missing_keys, unexpected_keys = model_to_load.load_state_dict(encoder_state_dict, strict=False)
+        model_to_load = model.module if hasattr(model, 'module') else model # model_to_load is the the model used to load weights for FCMF
+        missing_keys, unexpected_keys = model_to_load.load_state_dict(encoder_state_dict, strict=False) # Load encoder weights for FCMF by model_to_load    
         
         if master_process: 
             logger.info(f"--> Pretrained Encoder loaded successfully.")
