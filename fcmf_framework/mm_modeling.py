@@ -576,6 +576,8 @@ class TransformerDecoderBlock(nn.Module):
         # Encoder-decoder attention
         Y2, _ = self.attention2(enc_outputs, Y, enc_valid_lens)
         Z = self.addnorm2(Y, Y2)
+        print(f"Self-attention: {X2}")
+        print(f"Encoder-Decoder attention: {Y2}")
         return self.add_norm3(Z, self.ffn(Z)), state
     
 class PositionalEncoding(nn.Module): 
@@ -618,7 +620,6 @@ class IAOGDecoder(nn.Module):
         
         for i, blk in enumerate(self.blks):
             X, state = blk(X, state, is_train=is_train)
-            print(f"Decoder hidden state sample {i}: {X}\n\n")
             # [FIX] Truy cập trực tiếp vào .attention_weights thay vì .attention.attention_weights
             self._attention_weights[0][i] = blk.attention1.attention_weights
             self._attention_weights[1][i] = blk.attention2.attention_weights
