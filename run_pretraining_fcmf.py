@@ -59,7 +59,7 @@ def main():
                         help="The input data dir. Should contain train/dev/test json files.")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
-    parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True,
+    parser.add_argument("-- ", default=None, type=str, required=True,
                         help="Pretrained huggingface model (e.g. xlm-roberta-base).") ##Note pretrained_hf_model is path for model like xlm-roberta-base, not path for iaog pretraining weights
     parser.add_argument('--image_dir', default='../vimacsa/image', help='path to images')
     parser.add_argument('--resnet_label_path', default='/kaggle/input/resnet-output', help='Directory containing resnet label jsons')
