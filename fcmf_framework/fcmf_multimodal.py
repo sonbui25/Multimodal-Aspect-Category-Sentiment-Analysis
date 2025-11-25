@@ -11,7 +11,7 @@ from .fcmf_pretraining import FCMFEncoder
 class FCMF(nn.Module):
     def __init__(self, pretrained_path, num_labels=4, num_imgs = 7, num_roi = 7, alpha=0.7):
         super(FCMF, self).__init__()
-        self.encoder = FCMFEncoder(pretrained_path, num_labels, num_imgs, num_roi, alpha)
+        self.encoder = FCMFEncoder(pretrained_path, num_imgs, num_roi, alpha)
         self.text_pooler = BertPooler()
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
         self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)

@@ -74,7 +74,7 @@ def main():
     parser.add_argument("--num_imgs", default=7, type=int)
     parser.add_argument("--num_rois", default=4, type=int)
     parser.add_argument('--fine_tune_cnn', action='store_true')
-
+    parser.add_argument("--alpha", default=0.8, type=float)
     # --- TRAINING HYPERPARAMETERS ---
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
@@ -186,7 +186,13 @@ def main():
     # ==========================================================================================
     # 4. INITIALIZE MODEL
     # ==========================================================================================
-    model = FCMFSeq2Seq(args.pretrained_hf_model, vocab_size=len(tokenizer), max_len_decoder=args.max_len_decoder)
+    model = FCMFSeq2Seq(vocab_size=len(tokenizer), 
+                        max_len_decoder=args.max_len_decoder,
+                        pretrained_hf_path = args.pretrained_hf_model,
+                        num_imgs = args.num_imgs,
+                        num_roi = args.num_rois,
+                        alpha = args.alpha
+                        )
     model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
     model.decoder.embedding = torch.nn.Embedding(len(tokenizer), model.decoder.num_hiddens)
 
