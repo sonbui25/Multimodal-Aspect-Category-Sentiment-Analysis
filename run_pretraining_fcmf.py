@@ -86,6 +86,7 @@ def main():
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--fp16', action='store_true')
+    parser.add_argument('--adam_epsilon', type=float, default=1e-8)
     
     # --- SYSTEM ---
     parser.add_argument("--no_cuda", action='store_true')
@@ -239,8 +240,8 @@ def main():
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.1)
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
 
     # Scheduler Setup
