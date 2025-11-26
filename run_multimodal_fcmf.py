@@ -370,50 +370,54 @@ def main():
                         roi_embeds = torch.stack(encoded_roi, dim=1)
 
                         # Train Loop for each Aspect
+                        # Train Loop for each Aspect
                         all_asp_loss = 0
                         for id_asp in range(len(ASPECT)):
                             logits = model(
                                 input_ids=all_input_ids[:,id_asp,:],
-                                token_type_ids=all_token_types_ids[:,id_asp,:],
-                                attention_mask=all_attn_mask[:,id_asp,:],
-                                added_attention_mask=all_added_input_mask[:,id_asp,:],
-                                visual_embeds_att=vis_embeds,
-                                roi_embeds_att=roi_embeds,
-                                roi_coors=roi_coors
+                                # ... (các tham số khác) ...
                             )
+                            
+                            # Tính loss thành phần
                             loss = criterion(logits, all_label_id[:,id_asp])
                             all_asp_loss += loss
 
+                        # Chia trung bình loss trước khi backward (Gradient Accumulation)
                         if args.gradient_accumulation_steps > 1:
                             all_asp_loss = all_asp_loss / args.gradient_accumulation_steps
 
-                    # Backward
-                    if (step + 1) % args.gradient_accumulation_steps == 0:
-                        # [BƯỚC 1] Unscale (Bắt buộc nếu dùng FP16 trước khi Clip)
+                        # Backward
                         if args.fp16:
-                            scaler.unscale_(optimizer)
-
-                        # [BƯỚC 2] Gradient Clipping (Thêm đoạn này)
-                        # Giới hạn norm của gradient ở mức 1.0 (chuẩn chung của BERT/RoBERTa)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                        
-                        # Nếu bạn fine-tune cả CNN thì cũng nên clip cho nó
-                        if args.fine_tune_cnn:
-                            torch.nn.utils.clip_grad_norm_(resnet_img.parameters(), 1.0)
-                            torch.nn.utils.clip_grad_norm_(resnet_roi.parameters(), 1.0)
-
-                        # [BƯỚC 3] Optimizer Step
-                        if args.fp16:
-                            scaler.step(optimizer)
-                            scaler.update()
+                            scaler.scale(all_asp_loss).backward()
                         else:
-                            optimizer.step()
-                        
-                        scheduler.step()
-                        optimizer.zero_grad()
-                        global_step += 1
-                    
-                    tepoch.set_postfix(loss=all_asp_loss.item())
+                            all_asp_loss.backward()
+
+                        # Optimizer Step
+                        if (step + 1) % args.gradient_accumulation_steps == 0:
+                            
+                            # Unscale & Clip (Best Practice)
+                            if args.fp16:
+                                scaler.unscale_(optimizer)
+                            
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                            
+                            if args.fine_tune_cnn:
+                                torch.nn.utils.clip_grad_norm_(resnet_img.parameters(), 1.0)
+                                torch.nn.utils.clip_grad_norm_(resnet_roi.parameters(), 1.0)
+
+                            # Update Weights
+                            if args.fp16:
+                                scaler.step(optimizer)
+                                scaler.update()
+                            else:
+                                optimizer.step()
+                            
+                            scheduler.step()
+                            optimizer.zero_grad()
+                            global_step += 1
+                            
+                            # Hiển thị Loss thực tế
+                            tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
 
             # --- Evaluation (End of Epoch) ---
             if master_process and args.do_eval:
@@ -441,9 +445,18 @@ def main():
                         all_added_input_mask = all_added_input_mask.to(device)
                         all_label_id = all_label_id.to(device)
 
-                        encoded_img = [resnet_img(t_img_features[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
+                         # Feature Extract
+                        encoded_img = []
+                        for img_idx in range(args.num_imgs):
+                            img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
+                            encoded_img.append(img_f)
+                        
+                        encoded_roi = []
+                        for img_idx in range(args.num_imgs):
+                            roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
+                            encoded_roi.append(torch.stack(roi_list, dim=1))
+                        
                         vis_embeds = torch.stack(encoded_img, dim=1)
-                        encoded_roi = [torch.stack([resnet_roi(roi_img_features[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(encoded_roi, dim=1)
 
                         for id_asp in range(len(ASPECT)):
@@ -544,9 +557,18 @@ def main():
                 all_added_input_mask = all_added_input_mask.to(device)
                 all_label_id = all_label_id.to(device)
 
-                encoded_img = [resnet_img(t_img_features[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
+                # Feature Extract
+                encoded_img = []
+                for img_idx in range(args.num_imgs):
+                    img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
+                    encoded_img.append(img_f)
+                
+                encoded_roi = []
+                for img_idx in range(args.num_imgs):
+                    roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
+                    encoded_roi.append(torch.stack(roi_list, dim=1))
+                
                 vis_embeds = torch.stack(encoded_img, dim=1)
-                encoded_roi = [torch.stack([resnet_roi(roi_img_features[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                 roi_embeds = torch.stack(encoded_roi, dim=1)
 
                 for id_asp in range(len(ASPECT)):
