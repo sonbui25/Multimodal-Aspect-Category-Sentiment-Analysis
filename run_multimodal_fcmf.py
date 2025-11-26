@@ -311,7 +311,8 @@ def main():
             logger.info(f"--> Pretrained Encoder loaded successfully.")
             logger.info(f"    Keys loaded: {len(encoder_state_dict)}")
             logger.info(f"    Missing keys (expected): {len(missing_keys)}") # Classifier/Pooler keys
-
+    else:
+        if master_process: logger.info("--> No checkpoint or pretrained IAOG path provided. Training from scratch.")
     # ==========================================================================================
     # 6. TRAINING LOOP
     # ==========================================================================================
