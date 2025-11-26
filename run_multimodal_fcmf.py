@@ -311,6 +311,8 @@ def main():
             logger.info(f"--> Pretrained Encoder loaded successfully.")
             logger.info(f"    Keys loaded: {len(encoder_state_dict)}")
             logger.info(f"    Missing keys (expected): {len(missing_keys)}") # Classifier/Pooler keys
+    else:
+        if master_process: logger.info("--> No checkpoint or pretrained IAOG path provided. Training from scratch.")
     # ==========================================================================================
     # 6. TRAINING LOOP
     # ==========================================================================================
@@ -520,7 +522,7 @@ def main():
         best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
-            checkpoint = torch.load(best_path, map_location=device)
+            checkpoint = torch.load(best_path, map_location=device, weights_only=False)
             
             if isinstance(model, (DDP, torch.nn.DataParallel)):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
