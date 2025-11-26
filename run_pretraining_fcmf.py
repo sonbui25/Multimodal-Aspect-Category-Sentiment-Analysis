@@ -138,7 +138,7 @@ def main():
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         
-        # 4. Tạo Console Handler (In ra màn hình) <--- CÁI BẠN CẦN
+        # 4. Tạo Console Handler (In ra màn hình)
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)

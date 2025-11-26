@@ -388,12 +388,21 @@ def main():
                             all_asp_loss = all_asp_loss / args.gradient_accumulation_steps
 
                     # Backward
-                    if args.fp16:
-                        scaler.scale(all_asp_loss).backward()
-                    else:
-                        all_asp_loss.backward()
-
                     if (step + 1) % args.gradient_accumulation_steps == 0:
+                        # [BƯỚC 1] Unscale (Bắt buộc nếu dùng FP16 trước khi Clip)
+                        if args.fp16:
+                            scaler.unscale_(optimizer)
+
+                        # [BƯỚC 2] Gradient Clipping (Thêm đoạn này)
+                        # Giới hạn norm của gradient ở mức 1.0 (chuẩn chung của BERT/RoBERTa)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        
+                        # Nếu bạn fine-tune cả CNN thì cũng nên clip cho nó
+                        if args.fine_tune_cnn:
+                            torch.nn.utils.clip_grad_norm_(resnet_img.parameters(), 1.0)
+                            torch.nn.utils.clip_grad_norm_(resnet_roi.parameters(), 1.0)
+
+                        # [BƯỚC 3] Optimizer Step
                         if args.fp16:
                             scaler.step(optimizer)
                             scaler.update()
