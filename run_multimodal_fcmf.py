@@ -375,7 +375,12 @@ def main():
                         for id_asp in range(len(ASPECT)):
                             logits = model(
                                 input_ids=all_input_ids[:,id_asp,:],
-                                # ... (các tham số khác) ...
+                                token_type_ids=all_token_types_ids[:,id_asp,:],
+                                attention_mask=all_attn_mask[:,id_asp,:],
+                                added_attention_mask=all_added_input_mask[:,id_asp,:],
+                                visual_embeds_att=vis_embeds,
+                                roi_embeds_att=roi_embeds,
+                                roi_coors=roi_coors
                             )
                             
                             # Tính loss thành phần
