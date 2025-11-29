@@ -422,10 +422,6 @@ def main():
                         total_val_loss += loss.item()
 
                 avg_val_loss = total_val_loss / len(dev_dataloader)
-                if master_process:
-                    logger.info(f"***** Epoch {epoch} Eval Results *****")
-                    logger.info(f"  Avg Dev Loss = {avg_val_loss:.5f}")
-                    logger.info(f"  Current Best Loss = {min_val_loss:.5f}") # In thêm cái này cho dễ theo dõi
                 # Save BEST Checkpoint (Only Master)
                 if avg_val_loss < min_val_loss:
                     min_val_loss = avg_val_loss
@@ -433,7 +429,10 @@ def main():
                     save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch)
                     save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch)
                     save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch)
-
+                if master_process:
+                    logger.info(f"***** Epoch {epoch} Eval Results *****")
+                    logger.info(f"  Avg Dev Loss = {avg_val_loss:.5f}")
+                    logger.info(f"  Current Best Loss = {min_val_loss:.5f}") # In thêm cái này cho dễ theo dõi
                 # Save LATEST Checkpoint (For Resuming)
                 save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch)
                 save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch)
