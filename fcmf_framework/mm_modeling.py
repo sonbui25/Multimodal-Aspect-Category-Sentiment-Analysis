@@ -549,10 +549,10 @@ class PositionWiseFFN(nn.Module):
     def __init__(self, ffn_num_hiddens, ffn_num_outputs):
         super(PositionWiseFFN, self).__init__()
         self.dense1 = nn.Linear(HIDDEN_SIZE, ffn_num_hiddens)
-        self.relu = nn.ReLU()
+        self.act = ACT2FN[HIDDEN_ACT]
         self.dense2 = nn.Linear(ffn_num_hiddens, ffn_num_outputs)
     def forward(self, x):
-        return self.dense2(self.relu(self.dense1(x)))
+        return self.dense2(self.act(self.dense1(x)))
 class AddNorm(nn.Module):
     "The residual connection followed by layer normalization."
     def __init__(self, norm_shape,  dropout):

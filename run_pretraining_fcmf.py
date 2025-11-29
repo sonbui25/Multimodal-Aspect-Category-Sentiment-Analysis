@@ -437,6 +437,8 @@ def main():
                 save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch)
                 save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch)
                 save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch)
+                print("\n")
+
 
     # ==========================================================================================
     # 8. TEST EVALUATION (FULL) - ROUGE SCORE
