@@ -116,10 +116,35 @@ class FCMFEncoder(nn.Module):
             
         return final_multimodal_encoder
 class FCMFSeq2Seq(nn.Module):
-    def __init__(self, vocab_size, max_len_decoder, pretrained_hf_path, num_imgs, num_roi, alpha): #Note pretrained_hf_path is path for model like xlm-roberta-base, not path for iaog pretraining weights
+    def __init__(self, vocab_size, max_len_decoder, pretrained_hf_path, num_imgs, num_roi, alpha):
         super(FCMFSeq2Seq, self).__init__()
         self.encoder = FCMFEncoder(pretrained_hf_path, num_imgs=num_imgs, num_roi=num_roi, alpha=alpha)
         self.decoder = IAOGDecoder(vocab_size=vocab_size, max_len_decoder=max_len_decoder)
+        
+        # --- BƯỚC 1: KHỞI TẠO TRỌNG SỐ CHO CÁC THÀNH PHẦN MỚI ---
+        # Chỉ áp dụng cho Decoder và các lớp Linear "lạ" trong Encoder
+        # KHÔNG áp dụng cho self.encoder.bert (Pre-trained Backbone)
+        
+        self.decoder.apply(self._init_weights)
+        
+        # Khởi tạo các lớp chiếu (projection) trong Encoder (nếu chưa được init đúng)
+        self.encoder.vismap2text.apply(self._init_weights)
+        self.encoder.roimap2text.apply(self._init_weights)
+        self.encoder.box_head.apply(self._init_weights)
+        # Các module attention tự viết cũng cần init
+        self.encoder.text2img_attention.apply(self._init_weights)
+        self.encoder.mm_attention.apply(self._init_weights)
+        self.encoder.MultimodalDenoisingEncoder.apply(self._init_weights)
+
+        # --- BƯỚC 2: CHIA SẺ TRỌNG SỐ (WEIGHT TYING) ---
+        # Làm bước này SAU khi khởi tạo để đảm bảo Embedding không bị reset
+        
+        # Share Encoder <-> Decoder Embedding
+        if hasattr(self.encoder.bert.cell, 'embeddings'):
+             self.decoder.embedding.weight = self.encoder.bert.cell.embeddings.word_embeddings.weight
+        
+        # Share Decoder Embedding <-> Decoder Output Dense
+        self.decoder.dense.weight = self.decoder.embedding.weight
     def forward(self, enc_X, dec_X, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None, source_valid_len = None, is_train=True):
         enc_output_last_layer = self.encoder( #enc_output_last_layer is batch_size, seq_len, hidden_size or final_multimodal_encoder[-1] or encoder_output[-1]
             enc_X, 
@@ -133,3 +158,18 @@ class FCMFSeq2Seq(nn.Module):
         dec_state = self.decoder.init_state(enc_output_last_layer, source_valid_len)
         logits = self.decoder(dec_X, dec_state, is_train=is_train)
         return logits
+    def _init_weights(self, module):
+        """Khởi tạo trọng số chuẩn cho Transformer (Mean=0, Std=0.02)"""
+        if isinstance(module, nn.Linear):
+            # Normal distribution tốt cho Transformer hơn là Uniform/Kaiming
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+        elif isinstance(module, nn.Embedding):
+            # Với Embedding mới (nếu không share), cũng init normal
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()

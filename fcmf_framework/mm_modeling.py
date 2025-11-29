@@ -629,7 +629,7 @@ class IAOGDecoder(nn.Module):
         for i in range(NUM_HIDDEN_LAYERS):
             self.blks.add_module('block' + str(i), TransformerDecoderBlock(i))
         self.dense = nn.Linear(self.num_hiddens, vocab_size)
-    
+        self.dense.weight = self.embedding.weight
     def init_state(self, enc_outputs, enc_valid_lens):
         return [enc_outputs, enc_valid_lens, [None] * self.num_blks]
 
