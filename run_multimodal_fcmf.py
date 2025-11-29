@@ -133,6 +133,7 @@ def main():
         os.makedirs(args.output_dir, exist_ok=True)
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.INFO)
+        logger.propagate = False
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S')
         file_handler = logging.FileHandler(f'{args.output_dir}/training_fcmf.log')
         file_handler.setFormatter(formatter)

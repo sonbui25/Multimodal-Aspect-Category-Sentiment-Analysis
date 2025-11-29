@@ -117,28 +117,28 @@ def main():
         master_process = True
         ddp_world_size = 1
 
-    print(f"Running on device: {device}")
+    print(f"Running on device:{ddp_local_rank}")
+    
+    # Khai báo logger toàn cục cho hàm main
+    logger = logging.getLogger(__name__)
 
+    # --- CẤU HÌNH LOGGING CHUẨN (COPY TỪ RUN_MULTIMODAL) ---
     if master_process:
-        if not os.path.exists(args.output_dir):
-            os.makedirs(args.output_dir)
-        
-        # --- THAY THẾ ĐOẠN logging.basicConfig CŨ BẰNG ĐOẠN NÀY ---
         print("===================== RUN Pre-training IAOG =====================")
+        os.makedirs(args.output_dir, exist_ok=True)
         
-        # 1. Tạo Logger
-        logger = logging.getLogger(__name__)
         logger.setLevel(logging.INFO)
+        logger.propagate = False # [QUAN TRỌNG] Chặn in đúp log
         
-        # 2. Tạo Formatter (Định dạng giờ giấc, nội dung)
+        # Định dạng thời gian giống hệt file gốc
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S')
         
-        # 3. Tạo File Handler (Ghi vào file)
-        file_handler = logging.FileHandler(f'{args.output_dir}/training_iaog.log')
+        # 1. Ghi vào file
+        file_handler = logging.FileHandler(f'{args.output_dir}/training_iaog.log', mode='a')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         
-        # 4. Tạo Console Handler (In ra màn hình)
+        # 2. In ra màn hình Console
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
@@ -146,10 +146,8 @@ def main():
         logger.info(f"Arguments: {args}")
         logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
             device, ddp_world_size, bool(args.ddp), args.fp16))
-        
     else:
-        # Các process phụ không cần log (hoặc chỉ log lỗi)
-        logger = logging.getLogger(__name__)
+        # Các process phụ chỉ cần handler rỗng để không gây lỗi khi gọi logger.info
         logger.addHandler(logging.NullHandler())
 
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
@@ -424,11 +422,10 @@ def main():
                         total_val_loss += loss.item()
 
                 avg_val_loss = total_val_loss / len(dev_dataloader)
-                logger.info(f"Dev Loss Epoch {epoch}: {avg_val_loss}")
-                # In ra Val Loss và Rouge Scores
-                print(f"***** Epoch {epoch} Eval Results *****")
-                print(f"  Avg Dev Loss = {avg_val_loss}")
-                
+                if master_process:
+                    logger.info(f"***** Epoch {epoch} Eval Results *****")
+                    logger.info(f"  Avg Dev Loss = {avg_val_loss:.5f}")
+                    logger.info(f"  Current Best Loss = {min_val_loss:.5f}") # In thêm cái này cho dễ theo dõi
                 # Save BEST Checkpoint (Only Master)
                 if avg_val_loss < min_val_loss:
                     min_val_loss = avg_val_loss

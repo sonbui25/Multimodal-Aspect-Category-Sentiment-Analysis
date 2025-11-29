@@ -91,25 +91,36 @@ class IAOGDataset(Dataset):
         # PHẦN 2: XỬ LÝ TARGET CHO DECODER (Quan trọng nhất)
         # ----------------------------------------------------------------------
         
-        # Chuẩn hóa nhãn: "Room#Positive" -> "room positive"
-        sentiment_aspects = [asp.replace("#", ' ') for asp in iaog_label]
-        if len(sentiment_aspects) == 0: 
-            sentiment_aspects = ['empty']
-        joined_sentiment_aspects = ' </s> '.join(sentiment_aspects)
+        # 1. Chuẩn hóa danh sách nhãn
+        processed_labels = []
+        if len(iaog_label) == 0:
+            processed_labels = ['empty']
+        else:
+            for item in iaog_label:
+                # Tách: 'tốt#Facilities' -> 'tốt facilities'
+                parts = item.split('#')
+                if len(parts) == 2:
+                    processed_labels.append(f"{parts[0]} {parts[1]}")
+                else:
+                    processed_labels.append(item)
+        
+        # 2. [QUAN TRỌNG] Sắp xếp (Sort) để model học thứ tự nhất quán
+        # Tránh việc lúc thì "A, B", lúc thì "B, A" làm model bị loạn
+        processed_labels.sort() 
 
-        # Tạo chuỗi đích: <iaog> room positive </s> service negative ...
-        label_str = f"<iaog> {joined_sentiment_aspects}"
+        # 3. [QUAN TRỌNG NHẤT] Dùng DẤU PHẨY ',' thay vì </s>
+        # Output mong muốn: "<iaog> tốt facilities , sạch sẽ room </s>"
+        label_content = ' , '.join(processed_labels) 
+        
+        label_str = f"<iaog> {label_content}"
         label_str = label_str.lower().replace('_', ' ')
 
         # Tokenize Label
-        # Lưu ý: XLM-R tự động thêm <s> ở đầu và </s> ở cuối
-        # Input_ids sẽ là: [<s> <iaog> tệ facilities</s> rộng public area</s><pad>, <pad>...]
         label_tokens = self.tokenizer(
             label_str, 
-            max_length=self.max_len_decoder, 
+            max_length=self.max_len_decoder, # Hãy chắc chắn max_len đủ dài (ví dụ 128)
             padding='max_length', 
             truncation=True,
-            return_token_type_ids=False,
             return_attention_mask=True,
             return_tensors='pt'
         )
