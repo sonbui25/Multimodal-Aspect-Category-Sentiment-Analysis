@@ -238,8 +238,8 @@ def main():
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=0.01)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.1)
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
 
     # Scheduler Setup

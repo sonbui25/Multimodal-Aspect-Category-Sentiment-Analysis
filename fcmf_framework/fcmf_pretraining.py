@@ -122,12 +122,12 @@ class FCMFSeq2Seq(nn.Module):
         self.decoder = IAOGDecoder(vocab_size=vocab_size, max_len_decoder=max_len_decoder)
         
         # --- BƯỚC 1: KHỞI TẠO TRỌNG SỐ CHO CÁC THÀNH PHẦN MỚI ---
-        # Chỉ áp dụng cho Decoder và các lớp Linear "lạ" trong Encoder
+        # Chỉ áp dụng cho Decoder và các lớp Linear Encoder
         # KHÔNG áp dụng cho self.encoder.bert (Pre-trained Backbone)
         
         self.decoder.apply(self._init_weights)
         
-        # Khởi tạo các lớp chiếu (projection) trong Encoder (nếu chưa được init đúng)
+        # Khởi tạo các lớp chiếu (projection) trong Encoder
         self.encoder.vismap2text.apply(self._init_weights)
         self.encoder.roimap2text.apply(self._init_weights)
         self.encoder.box_head.apply(self._init_weights)
