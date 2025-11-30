@@ -272,11 +272,13 @@ def main():
             resroi_path = checkpoint_path.replace("fcmf_model", "resroi_model")
             
             if os.path.exists(resimg_path):
+                logger.info(f"--> Loading ResNet Image weights from: {resimg_path}")
                 resimg_ckpt = torch.load(resimg_path, map_location=device)
                 unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
                 unwrap_resimg.load_state_dict(resimg_ckpt['model_state_dict'])
                 
             if os.path.exists(resroi_path):
+                logger.info(f"--> Loading ResNet RoI weights from: {resroi_path}")
                 resroi_ckpt = torch.load(resroi_path, map_location=device)
                 unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
                 unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
