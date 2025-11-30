@@ -239,7 +239,7 @@ def main():
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
     
     if args.fp16:
-        scaler = torch.cuda.amp.GradScaler() # Or scaler = torch.amp.GradScaler('cuda') for newer torch versions
+        scaler = torch.amp.GradScaler('cuda') # Or scaler = torch.amp.GradScaler('cuda') for newer torch versions
 
     num_train_steps = 0
     if args.do_train:
