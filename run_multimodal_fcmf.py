@@ -358,7 +358,7 @@ def main():
                     all_added_input_mask = all_added_input_mask.to(device)
                     all_label_id = all_label_id.to(device)
 
-                    with torch.cuda.amp.autocast(enabled=args.fp16):
+                    with torch.amp.autocast('cuda', enabled=args.fp16):
                         # Feature Extract
                         encoded_img = []
                         for img_idx in range(args.num_imgs):
