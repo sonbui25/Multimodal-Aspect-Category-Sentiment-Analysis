@@ -600,18 +600,23 @@ def main():
         with open(output_eval_file, "w") as writer:
             writer.write("***** Test results *****\n")
             all_f1 = 0
+            all_precision = 0
+            all_recall = 0
             for id_asp in range(len(ASPECT)):
                 tr = np.concatenate(true_label_list[idx2asp[id_asp]])
                 pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
                 precision, recall, f1 = macro_f1(tr, pr)
                 all_f1 += f1
-                
+                all_precision += precision
+                all_recall += recall
                 writer.write(f"{idx2asp[id_asp]} - P: {precision:.4f}, R: {recall:.4f}, F1: {f1:.4f}\n")
                 logger.info(f"{idx2asp[id_asp]} - F1: {f1:.4f}")
             
             avg_f1 = all_f1 / len(ASPECT)
-            writer.write(f"Average Macro-F1: {avg_f1:.4f}\n")
-            logger.info(f"Test Average Macro-F1: {avg_f1:.4f}")
+            avg_precision = all_precision / len(ASPECT)
+            avg_recall = all_recall / len(ASPECT)
+            writer.write(f"Average - P: {avg_precision:.4f}, R: {avg_recall:.4f}, F1: {avg_f1:.4f}\n")
+            logger.info(f"Average - P: {avg_precision:.4f}, R: {avg_recall:.4f}, F1: {avg_f1:.4f}")
 
 if __name__ == '__main__':
     main()
