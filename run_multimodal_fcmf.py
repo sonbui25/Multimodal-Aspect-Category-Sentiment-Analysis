@@ -228,15 +228,54 @@ def main():
     # ==========================================================================================
     # 4. OPTIMIZER & SCHEDULER
     # ==========================================================================================
-    param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    ]
+    # 1. Tách tham số của Encoder (cần bảo toàn kiến thức) và Classifier (cần học nhanh)
+    # Trong fcmf_multimodal.py, tên các module là: self.encoder, self.text_pooler, self.classifier
     
-    criterion = torch.nn.CrossEntropyLoss()
+    encoder_params = []
+    head_params = []
+    
+    # Liệt kê tên các module thuộc phần Head
+    head_names = ['classifier', 'text_pooler'] 
+    
+    for n, p in model.named_parameters():
+        if any(nd in n for nd in head_names):
+            head_params.append((n, p))
+        else:
+            encoder_params.append((n, p))
+
+    # 2. Thiết lập Learning Rate riêng biệt
+    # LR cho Encoder nhỏ (ví dụ 1e-5) để tránh Catastrophic Forgetting
+    # LR cho Head lớn (ví dụ 1e-4 hoặc 5e-4) để hội tụ nhanh
+    
+    optimizer_grouped_parameters = [
+        # Nhóm Encoder: LR thấp
+        {
+            'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
+            'weight_decay': 0.01,
+            'lr': 1e-5  # <--- QUAN TRỌNG: LR thấp hơn config gốc
+        },
+        {
+            'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)],
+            'weight_decay': 0.0,
+            'lr': 1e-5
+        },
+        # Nhóm Head (Classifier): LR cao
+        {
+            'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)],
+            'weight_decay': 0.01,
+            'lr': 1e-4 # <--- QUAN TRỌNG: LR cao hơn (gấp 10 lần encoder)
+        },
+        {
+            'params': [p for n, p in head_params if any(nd in n for nd in no_decay)],
+            'weight_decay': 0.0,
+            'lr': 1e-4
+        }
+    ]
+
+    # Lưu ý: Khi khởi tạo optimizer, tham số lr ở đây chỉ là default, sẽ bị ghi đè bởi lr trong groups
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+    criterion = torch.nn.CrossEntropyLoss()
     
     if args.fp16:
         scaler = torch.amp.GradScaler('cuda') # Or scaler = torch.amp.GradScaler('cuda') for newer torch versions
