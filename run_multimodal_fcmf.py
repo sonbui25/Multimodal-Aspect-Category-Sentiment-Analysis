@@ -253,23 +253,23 @@ def main():
         {
             'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
-            'lr': 1e-5  # <--- QUAN TRỌNG: LR thấp hơn config gốc
+            'lr': 3e-5  # <--- QUAN TRỌNG: LR thấp hơn config gốc
         },
         {
             'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)],
             'weight_decay': 0.0,
-            'lr': 1e-5
+            'lr': 3e-5
         },
         # Nhóm Head (Classifier): LR cao
         {
             'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
-            'lr': 1e-4 # <--- QUAN TRỌNG: LR cao hơn (gấp 10 lần encoder)
+            'lr': 3e-4 # <--- QUAN TRỌNG: LR cao hơn (gấp 10 lần encoder)
         },
         {
             'params': [p for n, p in head_params if any(nd in n for nd in no_decay)],
             'weight_decay': 0.0,
-            'lr': 1e-4
+            'lr': 3e-4
         }
     ]
 
