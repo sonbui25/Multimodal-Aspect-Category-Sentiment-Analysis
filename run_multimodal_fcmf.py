@@ -380,7 +380,7 @@ def main():
             resnet_roi.train()
             optimizer.zero_grad()
 
-            with tqdm(train_dataloader, position=0, leave=True, disable=not master_process) as tepoch:
+            with tqdm(train_dataloader, position=0, leave=True, disable=not master_process, dynamic_ncols=True) as tepoch:
                 for step, batch in enumerate(tepoch):
                     tepoch.set_description(f"Epoch {train_idx}")
 
@@ -466,7 +466,8 @@ def main():
                             
                             # Hiển thị Loss thực tế
                             tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
-
+                            # Ghi log liên tục mà không ảnh hưởng đến thanh tqdm
+                            tqdm.write(f"Epoch {train_idx}, Step {step}, Loss: {all_asp_loss.item()}")
             # --- Evaluation (End of Epoch) ---
             if master_process and args.do_eval:
                 logger.info("***** Running evaluation on Dev Set *****")
