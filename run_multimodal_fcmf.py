@@ -467,7 +467,7 @@ def main():
                             # Hiển thị Loss thực tế
                             tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
                             # Ghi log liên tục mà không ảnh hưởng đến thanh tqdm
-                            tqdm.write(f"Epoch {train_idx}, Step {step}, Loss: {all_asp_loss.item()}")
+                            tqdm.write(f"\033[1;32mEpoch {train_idx}, Step {step}, Loss: {all_asp_loss.item()}\033[0m")
             # --- Evaluation (End of Epoch) ---
             if master_process and args.do_eval:
                 logger.info("***** Running evaluation on Dev Set *****")
