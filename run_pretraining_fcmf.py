@@ -2,40 +2,35 @@ import torch
 from text_preprocess import *
 from iaog_dataset import IAOGDataset 
 from fcmf_framework.fcmf_pretraining import FCMFSeq2Seq 
-from sklearn.metrics import precision_recall_fscore_support
 import argparse
 import logging
 import random
-from tqdm.auto import tqdm, trange
+from tqdm.auto import tqdm
 import numpy as np
-from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 import pandas as pd
-from underthesea import word_tokenize, text_normalize
+from underthesea import text_normalize
 from fcmf_framework.resnet_utils import *
-from torchvision.models import resnet152, ResNet152_Weights, resnet50, ResNet50_Weights
-from fcmf_framework.optimization import BertAdam
+from torchvision.models import resnet152, ResNet152_Weights
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import json
-from torch.cuda.amp import autocast
+from torch.cuda.amp import autocast 
 import os
-import glob
 from rouge_score import rouge_scorer
 
-def warmup_linear(x, warmup=0.002):
-    if x < warmup:
-        return x/warmup
-    return 1.0 - x
+# --- HELPER FUNCTIONS ---
 
-def save_model(path, model, optimizer, scheduler, epoch):
+def save_model(path, model, optimizer, scheduler, epoch, best_score):
     """
-    Lưu checkpoint đầy đủ trạng thái để có thể Resume sau này.
+    Save model checkpoint with all necessary states for resuming.
+    Includes 'best_score' to track the metric (ROUGE-1) improvement.
     """
-    if hasattr(model, 'module'):
+    if hasattr(model, 'module'): 
         model_state = model.module.state_dict()
-    else:
+    else: 
         model_state = model.state_dict()
         
     torch.save({
@@ -43,38 +38,36 @@ def save_model(path, model, optimizer, scheduler, epoch):
         "model_state_dict": model_state,
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
+        "best_score": best_score, 
     }, path)
-
-def load_model(path):
-    check_point = torch.load(path, map_location='cpu')
-    return check_point
 
 def main():
     parser = argparse.ArgumentParser()
 
-    # --- INPUT/OUTPUT PATHS ---
+    # --- PATH ARGUMENTS ---
     parser.add_argument("--data_dir", default='../vimacsa', type=str, required=True,
-                        help="The input data dir. Should contain train/dev/test json files.")
+                        help="Input data directory containing roi_data.csv")
     parser.add_argument("--pretrained_data_dir", default='../iaog-pretraining', type=str, required=True,
-                        help="The input data dir. Should contain train/dev/test json files.")
+                        help="Directory containing pretraining json files (train_with_iaog.json)")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
-                        help="The output directory where the model predictions and checkpoints will be written.")
+                        help="Output directory for checkpoints and logs")
     parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True,
-                        help="Pretrained huggingface model (e.g. xlm-roberta-base).") ##Note pretrained_hf_model is path for model like xlm-roberta-base, not path for iaog pretraining weights
-    parser.add_argument('--image_dir', default='../vimacsa/image', help='path to images')
-    parser.add_argument('--resnet_label_path', default='/kaggle/input/resnet-output', help='Directory containing resnet label jsons')
+                        help="HuggingFace pretrained model name (e.g., uitnlp/visobert)")
+    parser.add_argument('--image_dir', default='../vimacsa/image', help='Path to image folder')
+    parser.add_argument('--resnet_label_path', default='/kaggle/input/resnet-output', help='Path to ResNet label jsons')
     
-    # --- RESUME TRAINING ---
+    # --- RESUME ---
     parser.add_argument("--resume_from_checkpoint", default=None, type=str,
-                        help="Path to the checkpoint .pth file to resume training from.")
+                        help="Path to checkpoint to resume training")
 
     # --- MODEL CONFIG ---
     parser.add_argument("--max_seq_length", default=170, type=int)
     parser.add_argument("--max_len_decoder", default=20, type=int)
     parser.add_argument("--num_imgs", default=7, type=int)
     parser.add_argument("--num_rois", default=4, type=int)
-    parser.add_argument('--fine_tune_cnn', action='store_true')
-    parser.add_argument("--alpha", default=0.8, type=float)
+    parser.add_argument('--fine_tune_cnn', action='store_true', help="Whether to fine-tune ResNet")
+    parser.add_argument("--alpha", default=0.8, type=float, help="Alpha for MDE")
+    
     # --- TRAINING HYPERPARAMETERS ---
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
@@ -88,17 +81,15 @@ def main():
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--adam_epsilon', type=float, default=1e-8)
     
-    # --- SYSTEM ---
+    # --- DISTRIBUTED TRAINING ---
     parser.add_argument("--no_cuda", action='store_true')
     parser.add_argument("--ddp", action='store_true')
-
-    # Ignored args but kept for compatibility
-    parser.add_argument("--list_aspect", nargs='+', default=[]) 
+    parser.add_argument("--list_aspect", nargs='+', default=[]) # Kept for compatibility
 
     args = parser.parse_args()
 
     # ==========================================================================================
-    # 1. SETUP DEVICE & LOGGER
+    # 1. SETUP SYSTEM (Device, Logging, Seed)
     # ==========================================================================================
     if args.no_cuda:
         device = torch.device("cpu")
@@ -117,447 +108,342 @@ def main():
         master_process = True
         ddp_world_size = 1
 
-    print(f"Running on device:{ddp_local_rank}")
-    
-    # Khai báo logger toàn cục cho hàm main
+    # Setup Logging
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO if master_process else logging.WARN)
     logger = logging.getLogger(__name__)
+    if master_process: os.makedirs(args.output_dir, exist_ok=True)
 
-    # --- CẤU HÌNH LOGGING CHUẨN (COPY TỪ RUN_MULTIMODAL) ---
-    if master_process:
-        print("===================== RUN Pre-training IAOG =====================")
-        os.makedirs(args.output_dir, exist_ok=True)
-        
-        logger.setLevel(logging.INFO)
-        logger.propagate = False # [QUAN TRỌNG] Chặn in đúp log
-        
-        # Định dạng thời gian giống hệt file gốc
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S')
-        
-        # 1. Ghi vào file
-        file_handler = logging.FileHandler(f'{args.output_dir}/training_iaog.log', mode='a')
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        
-        # 2. In ra màn hình Console
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-        
-        logger.info(f"Arguments: {args}")
-        logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
-            device, ddp_world_size, bool(args.ddp), args.fp16))
-    else:
-        # Các process phụ chỉ cần handler rỗng để không gây lỗi khi gọi logger.info
-        logger.addHandler(logging.NullHandler())
-
+    # Adjust batch size for gradient accumulation
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
     
     # Set Seed
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if ddp_world_size > 1:
-        torch.cuda.manual_seed_all(args.seed)
+    if ddp_world_size > 1: torch.cuda.manual_seed_all(args.seed)
 
     # ==========================================================================================
-    # 2. TOKENIZER & METADATA
+    # 2. PREPARE DATA & TOKENIZER
     # ==========================================================================================
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
-    # [CRITICAL] Add special token <iaog>
+    # [CRITICAL] Add <iaog> token for decoder start
     tokenizer.add_special_tokens({'additional_special_tokens': ['<iaog>']})
-    
     normalize_class = TextNormalize()
 
-    # Load ResNet Metadata
+    # Load ResNet Metadata (Image/ROI Labels)
     try:
         roi_df = pd.read_csv(f"{args.data_dir}/roi_data.csv")
         roi_df['file_name'] = roi_df['file_name'] + '.png'
         
+        # Determine json path (support Kaggle structure)
         json_path = args.resnet_label_path if os.path.exists(f'{args.resnet_label_path}/resnet152_image_label.json') else args.data_dir
         with open(f'{json_path}/resnet152_image_label.json') as imf: dict_image_aspect = json.load(imf)
         with open(f'{json_path}/resnet152_roi_label.json') as rf: dict_roi_aspect = json.load(rf)
     except Exception as e:
-        if master_process: logger.error(f"Error loading metadata: {e}")
+        logger.error(f"Error loading metadata: {e}")
         return
 
-    # ==========================================================================================
-    # 3. PREPARE DATASETS
-    # ==========================================================================================
+    # Load Datasets
     if args.do_train:
         train_data = pd.read_json(f'{args.pretrained_data_dir}/train_with_iaog.json')
         dev_data = pd.read_json(f'{args.pretrained_data_dir}/dev_with_iaog.json')
         
+        # Preprocess text
         train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
-
+        
+        # Split for DDP
         if ddp_world_size > 1:
-            chunk_size = len(train_data) // ddp_world_size
-            train_data = train_data.iloc[chunk_size*ddp_local_rank : chunk_size*(ddp_local_rank+1)]
+            chunk = len(train_data) // ddp_world_size
+            train_data = train_data.iloc[chunk*ddp_local_rank : chunk*(ddp_local_rank+1)]
 
-        train_dataset = IAOGDataset(train_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, 
-                                    args.num_imgs, args.num_rois, args.max_len_decoder)
-        dev_dataset = IAOGDataset(dev_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, 
-                                  args.num_imgs, args.num_rois, args.max_len_decoder)
+        train_dataset = IAOGDataset(train_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder)
+        dev_dataset = IAOGDataset(dev_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder)
 
     # ==========================================================================================
-    # 4. INITIALIZE MODEL
+    # 3. INITIALIZE MODEL & RESNETS
     # ==========================================================================================
-    model = FCMFSeq2Seq(vocab_size=len(tokenizer), 
-                        max_len_decoder=args.max_len_decoder,
-                        pretrained_hf_path = args.pretrained_hf_model,
-                        num_imgs = args.num_imgs,
-                        num_roi = args.num_rois,
-                        alpha = args.alpha
-                        )
+    # Initialize FCMF Seq2Seq Model
+    model = FCMFSeq2Seq(len(tokenizer), args.max_len_decoder, args.pretrained_hf_model, args.num_imgs, args.num_rois, args.alpha)
+    # Resize embeddings for new tokens (<iaog>)
     model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
-    model.decoder.embedding = torch.nn.Embedding(len(tokenizer), model.decoder.num_hiddens)
-
-    img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
-    roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
-    resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
-    resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
-
+    model.decoder.embedding = torch.nn.Embedding(len(tokenizer), model.decoder.num_hiddens) # Explicitly resize decoder embedding if not tied immediately or for safety
+    
+    # Initialize ResNets (Frozen or Fine-tuned)
+    img_res = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
+    roi_res = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
+    resnet_img = myResNetImg(img_res, args.fine_tune_cnn, device).to(device)
+    resnet_roi = myResNetRoI(roi_res, args.fine_tune_cnn, device).to(device)
     model = model.to(device)
 
-    # DDP Setup
     if args.ddp:
         model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
         resnet_img = DDP(resnet_img, device_ids=[ddp_local_rank])
         resnet_roi = DDP(resnet_roi, device_ids=[ddp_local_rank])
-    elif torch.cuda.device_count() > 1 and not args.no_cuda:
-        model = torch.nn.DataParallel(model)
-        resnet_img = torch.nn.DataParallel(resnet_img)
-        resnet_roi = torch.nn.DataParallel(resnet_roi)
 
     # ==========================================================================================
-    # 5. OPTIMIZER & SCHEDULER
+    # 4. OPTIMIZER & SCHEDULER
     # ==========================================================================================
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
-    
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100) # Ignore padded labels
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
-
-    # Scheduler Setup
-    num_train_steps = 0
-    if args.do_train:
-        num_train_steps = len(train_dataset) // args.train_batch_size * args.num_train_epochs
+    
+    num_train_steps = len(train_dataset) // args.train_batch_size * args.num_train_epochs if args.do_train else 0
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_train_steps*args.warmup_proportion, num_training_steps=num_train_steps)
 
     # ==========================================================================================
-    # 6. RESUME CHECKPOINT LOGIC
+    # 5. CHECKPOINT RESUMING
     # ==========================================================================================
     start_epoch = 0
-    min_val_loss = float('inf')
+    max_rouge1 = 0.0 # [UPDATED] Track Best ROUGE-1 instead of Loss
 
-    if args.resume_from_checkpoint:
-        ckpt_path = args.resume_from_checkpoint
-        if os.path.isfile(ckpt_path):
-            if master_process: logger.info(f"Loading checkpoint from {ckpt_path}")
-            
-            # Load IAOG Model
-            checkpoint = torch.load(ckpt_path, map_location=device)
-            if isinstance(model, (DDP, torch.nn.DataParallel)):
-                model.module.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                model.load_state_dict(checkpoint['model_state_dict'])
-            
-            # Load Optimizer/Scheduler
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            
-            # Load ResNets (Assumes naming convention: seed_42_iaog_model_best.pth -> seed_42_resimg_model_best.pth)
-            resimg_path = ckpt_path.replace("iaog_model", "resimg_model")
-            resroi_path = ckpt_path.replace("iaog_model", "resroi_model")
-            
-            if os.path.exists(resimg_path):
-                resimg_ckpt = torch.load(resimg_path, map_location=device)
-                unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
-                unwrap_resimg.load_state_dict(resimg_ckpt['model_state_dict'])
-            
-            if os.path.exists(resroi_path):
-                resroi_ckpt = torch.load(resroi_path, map_location=device)
-                unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
-                unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
-
-            if master_process: logger.info(f"Resumed from Epoch {start_epoch}")
+    if args.resume_from_checkpoint and os.path.isfile(args.resume_from_checkpoint):
+        ckpt = torch.load(args.resume_from_checkpoint, map_location=device)
+        if isinstance(model, DDP):
+            model.module.load_state_dict(ckpt['model_state_dict'])
         else:
-            if master_process: logger.warning(f"Checkpoint {ckpt_path} not found. Starting from scratch.")
+            model.load_state_dict(ckpt['model_state_dict'])
+            
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        start_epoch = ckpt['epoch'] + 1
+        
+        # Restore best score if available
+        if 'best_score' in ckpt:
+            max_rouge1 = ckpt['best_score']
+            
+        logger.info(f"Resumed from epoch {start_epoch}, Current Best ROUGE-1: {max_rouge1}")
 
     # ==========================================================================================
-    # 7. TRAINING LOOP
+    # 6. TRAINING LOOP
     # ==========================================================================================
+    # Initialize Scorer for Validation/Test
+    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+
     if args.do_train:
-        sampler = DistributedSampler(train_dataset) if args.ddp else RandomSampler(train_dataset)
-        train_dataloader = DataLoader(train_dataset, sampler=sampler, batch_size=args.train_batch_size)
-        dev_dataloader = DataLoader(dev_dataset, sampler=SequentialSampler(dev_dataset), batch_size=args.eval_batch_size)
+        train_loader = DataLoader(train_dataset, sampler=DistributedSampler(train_dataset) if args.ddp else RandomSampler(train_dataset), batch_size=args.train_batch_size)
+        dev_loader = DataLoader(dev_dataset, sampler=SequentialSampler(dev_dataset), batch_size=args.eval_batch_size)
 
         for epoch in range(start_epoch, int(args.num_train_epochs)):
-            if args.ddp: sampler.set_epoch(epoch)
+            if args.ddp: train_loader.sampler.set_epoch(epoch)
             
-            if master_process: logger.info(f"***** Epoch {epoch} *****")
-            
-            model.train()
-            resnet_img.train()
-            resnet_roi.train()
+            # --- TRAIN PHASE ---
+            model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
-                        
-            # --- Train Step ---
-            pbar = tqdm(train_dataloader, disable=not master_process)
+            
+            pbar = tqdm(train_loader, disable=not master_process)
+            tr_loss = 0
+            
             for step, batch in enumerate(pbar):
                 pbar.set_description(f"Epoch {epoch}")
-                # 1. Đưa dữ liệu vào Device
+                
+                # Move to device
                 batch = tuple(t.to(device) for t in batch)
-                (t_img_features, roi_img_features, roi_coors, 
-                all_labels, all_dec_input_ids, all_dec_attn_mask, 
-                all_enc_input_ids, all_enc_type_ids, all_enc_attn_mask, 
-                all_added_input_mask, all_valid_lens) = batch
+                (t_img_f, roi_img_f, roi_coors, all_labels, all_dec_ids, all_dec_mask, 
+                 all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _) = batch
+                
+                roi_img_f = roi_img_f.float()
 
-                roi_img_features = roi_img_features.float()
-
-                # 2. Forward & Tính Loss
-                with autocast(enabled=args.fp16):
-                    # --- Feature Extraction ---
+                with torch.cuda.amp.autocast(enabled=args.fp16):
+                    # 1. Feature Extraction (Once per batch)
                     with torch.no_grad():
-                        enc_imgs = []
-                        for i in range(args.num_imgs):
-                            feat = resnet_img(t_img_features[:, i]).view(-1, 2048, 49).permute(0, 2, 1)
-                            enc_imgs.append(feat)
+                        enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                         vis_embeds = torch.stack(enc_imgs, dim=1)
-
-                        enc_rois = []
-                        for i in range(args.num_imgs):
-                            roi_list = [resnet_roi(roi_img_features[:, i, r]).squeeze(1) for r in range(args.num_rois)]
-                            enc_rois.append(torch.stack(roi_list, dim=1))
+                        enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                    # --- Model Forward ---
+                    # 2. Forward Loop (6 Aspects)
                     total_loss = 0
-                    # VÒNG LẶP QUA 6 ASPECT (Quan trọng)
-                    # ASPECT = ['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area']
-                    for id_asp in range(6): 
-                        # Lấy slice dữ liệu cho aspect thứ id_asp
-                        enc_input_ids = all_enc_input_ids[:, id_asp, :]
-                        enc_type_ids = all_enc_type_ids[:, id_asp, :]
-                        enc_attn_mask = all_enc_attn_mask[:, id_asp, :]
-                        added_attn_mask = all_added_input_mask[:, id_asp, :]
+                    for id_asp in range(6): # Loop over 6 aspects
+                        # Slice data for current aspect
+                        logits = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp], 
+                                       visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
+                                       token_type_ids=all_enc_type[:,id_asp], attention_mask=all_enc_mask[:,id_asp], 
+                                       added_attention_mask=all_add_mask[:,id_asp], is_train=True)
                         
-                        dec_input_ids = all_dec_input_ids[:, id_asp, :]
-                        labels = all_labels[:, id_asp, :]
-                        # valid_lens = all_valid_lens[:, id_asp] # Nếu cần dùng cho decoder state init
-
-                        # Forward model cho aspect này
-                        logits = model(
-                            enc_X=enc_input_ids,
-                            dec_X=dec_input_ids,
-                            visual_embeds_att=vis_embeds, # Ảnh dùng chung
-                            roi_embeds_att=roi_embeds,    # ROI dùng chung
-                            roi_coors=roi_coors,
-                            token_type_ids=enc_type_ids,
-                            attention_mask=enc_attn_mask,
-                            added_attention_mask=added_attn_mask,
-                            source_valid_len=None, # Hoặc valid_lens nếu decoder cần
-                            is_train=True
-                        )
-
-                        # Tính Loss thành phần
-                        loss_asp = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+                        # [FIX] Use reshape instead of view to handle non-contiguous tensors
+                        loss_asp = criterion(logits.reshape(-1, logits.size(-1)), all_labels[:,id_asp].reshape(-1))
                         total_loss += loss_asp
 
-                    # Backward trên tổng loss
-                    # total_loss = total_loss / 6.0 # Có thể chia trung bình nếu muốn scale loss nhỏ lại
-                    
-                    if args.gradient_accumulation_steps > 1:
-                        total_loss = total_loss / args.gradient_accumulation_steps
-                        
-                    scaler.scale(total_loss).backward()
+                    # Gradient Accumulation
+                    if args.gradient_accumulation_steps > 1: 
+                        total_loss /= args.gradient_accumulation_steps
 
-                # 4. Optimizer Step (Cập nhật trọng số)
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    # Unscale trước khi Clip
-                    if args.fp16:
-                        scaler.unscale_(optimizer) 
-
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    # Bước cập nhật optimizer
-                    if args.fp16:
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        optimizer.step()
-                    
-                    scheduler.step()
-                    optimizer.zero_grad()                    
-                    # Hiển thị Loss thực tế (nhân ngược lại để dễ nhìn)
-                    pbar.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
-
-            # --- Eval Step (After each Epoch) ---
-            if master_process and args.do_eval:
-                model.eval()
-                resnet_img.eval()
-                resnet_roi.eval()
+                # 3. Backward
+                if args.fp16: scaler.scale(total_loss).backward()
+                else: total_loss.backward()
                 
-                total_val_loss = 0
+                tr_loss += total_loss.item()
+
+                # 4. Optimization Step
+                if (step + 1) % args.gradient_accumulation_steps == 0:
+                    if args.fp16: scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    if args.fp16: scaler.step(optimizer); scaler.update()
+                    else: optimizer.step()
+                    scheduler.step(); optimizer.zero_grad()
+                    
+                    pbar.set_postfix(loss=total_loss.item() * args.gradient_accumulation_steps)
+
+            # --- VALIDATION PHASE (Calculate ROUGE) ---
+            if master_process and args.do_eval:
+                model.eval(); resnet_img.eval(); resnet_roi.eval()
+                val_loss = 0
+                val_rouge1_scores = []
+                val_rougeL_scores = []
+                
                 with torch.no_grad():
-                    for batch in tqdm(dev_dataloader, desc="Evaluating Dev", leave=False):
+                    for batch in tqdm(dev_loader, desc="Eval", leave=False):
                         batch = tuple(t.to(device) for t in batch)
-                        (t_img_feat, roi_img_feat, roi_coors, labels, dec_input_ids, _, 
-                         enc_input_ids, enc_type_ids, enc_mask, added_mask, valid_lens) = batch
+                        (t_img_f, roi_img_f, roi_coors, all_labels, all_dec_ids, _, 
+                         all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _) = batch
                         
-                        # Feature Extract
-                        enc_imgs = [resnet_img(t_img_feat[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
+                        # Feature Extraction
+                        enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                         vis_embeds = torch.stack(enc_imgs, dim=1)
-                        
-                        enc_rois = []
-                        for i in range(args.num_imgs):
-                            roi_list = [resnet_roi(roi_img_feat[:,i,r]).squeeze(1) for r in range(args.num_rois)]
-                            enc_rois.append(torch.stack(roi_list, dim=1))
+                        enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                        logits = model(enc_X=enc_input_ids, dec_X=dec_input_ids,
-                                       visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
-                                       token_type_ids=enc_type_ids, attention_mask=enc_mask,
-                                       added_attention_mask=added_mask, source_valid_len=valid_lens, is_train=True)
-                        
-                        loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-                        total_val_loss += loss.item()
+                        for id_asp in range(6):
+                            # A. Calculate Validation Loss
+                            logits = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp],
+                                           visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
+                                           token_type_ids=all_enc_type[:,id_asp], attention_mask=all_enc_mask[:,id_asp], 
+                                           added_attention_mask=all_add_mask[:,id_asp], is_train=True)
+                            
+                            val_loss += criterion(logits.reshape(-1, logits.size(-1)), all_labels[:,id_asp].reshape(-1)).item()
 
-                avg_val_loss = total_val_loss / len(dev_dataloader)
-                # Save BEST Checkpoint (Only Master)
-                if avg_val_loss < min_val_loss:
-                    min_val_loss = avg_val_loss
-                    logger.info("New Best Model! Saving...")
-                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch)
-                if master_process:
-                    logger.info(f"***** Epoch {epoch} Eval Results *****")
-                    logger.info(f"  Avg Dev Loss = {avg_val_loss:.5f}")
-                    logger.info(f"  Current Best Loss = {min_val_loss:.5f}") # In thêm cái này cho dễ theo dõi
-                # Save LATEST Checkpoint (For Resuming)
-                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch)
-                print("\n")
+                            # B. Calculate ROUGE (Greedy Generation)
+                            preds = torch.argmax(logits, dim=-1)
+                            decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+                            
+                            lbls = all_labels[:,id_asp].cpu().numpy()
+                            # Clean labels (remove -100 masking)
+                            lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
+                            decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
+                            
+                            for p, g in zip(decoded_preds, decoded_lbls):
+                                s = scorer.score(g, p)
+                                val_rouge1_scores.append(s['rouge1'].fmeasure)
+                                val_rougeL_scores.append(s['rougeL'].fmeasure)
 
+                # Calculate Average Metrics
+                avg_val_loss = val_loss / (len(dev_loader) * 6)
+                avg_rouge1 = np.mean(val_rouge1_scores) if val_rouge1_scores else 0.0
+                avg_rougeL = np.mean(val_rougeL_scores) if val_rougeL_scores else 0.0
+
+                logger.info(f"Epoch {epoch} | Val Loss: {avg_val_loss:.4f} | ROUGE-1: {avg_rouge1:.4f} | ROUGE-L: {avg_rougeL:.4f}")
+
+                # [UPDATED] Save BEST model based on ROUGE-1
+                if avg_rouge1 > max_rouge1:
+                    max_rouge1 = avg_rouge1
+                    logger.info(f"New Best ROUGE-1 ({max_rouge1:.4f})! Saving model...")
+                    
+                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_rouge1)
+                    # Also save ResNets
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rouge1)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rouge1)
+                
+                # Save LATEST model (for resuming)
+                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_rouge1)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rouge1)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rouge1)
 
     # ==========================================================================================
-    # 8. TEST EVALUATION (FULL) - ROUGE SCORE
+    # 7. TEST PHASE (With detailed Logging)
     # ==========================================================================================
     if args.do_eval and master_process:
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
-        
-        # 8.1 Load Test Data
         try:
             test_data = pd.read_json(f'{args.pretrained_data_dir}/test_with_iaog.json')
             test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
-            test_dataset = IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, 
-                                       args.num_imgs, args.num_rois, args.max_len_decoder)
-            test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
-        except Exception as e:
-            logger.error(f"Could not load test data: {e}")
+            test_loader = DataLoader(IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder), batch_size=args.eval_batch_size)
+        except Exception as e: 
+            logger.error(f"Cannot load test set: {e}")
             return
 
-        # 8.2 Load BEST Model
-        best_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
-        if os.path.exists(best_path):
-            logger.info(f"Loading Best Checkpoint from: {best_path}")
-            ckpt = torch.load(best_path, map_location=device)
-            
-            # Handle DDP wrapping
-            if isinstance(model, (DDP, torch.nn.DataParallel)):
-                model.module.load_state_dict(ckpt['model_state_dict'])
-            else:
-                model.load_state_dict(ckpt['model_state_dict'])
-                
-            # Load ResNets
-            rimg_ckpt = torch.load(best_path.replace("iaog", "resimg"), map_location=device)
-            unwrap_rimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
-            unwrap_rimg.load_state_dict(rimg_ckpt['model_state_dict'])
-            
-            rroi_ckpt = torch.load(best_path.replace("iaog", "resroi"), map_location=device)
-            unwrap_rroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
-            unwrap_rroi.load_state_dict(rroi_ckpt['model_state_dict'])
+        # Load BEST Checkpoint
+        ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
+        if os.path.exists(ckpt_path):
+            logger.info(f"Loading Best Checkpoint: {ckpt_path}")
+            ckpt = torch.load(ckpt_path, map_location=device)
+            if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
+            else: model.load_state_dict(ckpt['model_state_dict'])
         else:
-            logger.warning("No best checkpoint found in output_dir. Testing with current model weights.")
-
-        # 8.3 Run Test Loop
-        model.eval()
-        resnet_img.eval()
-        resnet_roi.eval()
-        total_test_loss = 0
+            logger.warning("No best checkpoint found! Testing with current model.")
+        
+        model.eval(); resnet_img.eval(); resnet_roi.eval()
+        
         all_preds = []
         all_labels = []
+        all_rouge1 = []
+        all_rougeL = []
 
         with torch.no_grad():
-            for batch in tqdm(test_dataloader, desc="Evaluating Test"):
+            for batch in tqdm(test_loader, desc="Test"):
                 batch = tuple(t.to(device) for t in batch)
-                (t_img_feat, roi_img_feat, roi_coors, labels, dec_input_ids, _, 
-                 enc_input_ids, enc_type_ids, enc_mask, added_mask, valid_lens) = batch
+                (t_img_f, roi_img_f, roi_coors, all_dec_lbls, all_dec_ids, _, 
+                 all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _) = batch
 
                 # Feature Extract
-                enc_imgs = [resnet_img(t_img_feat[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
+                enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                 vis_embeds = torch.stack(enc_imgs, dim=1)
-                enc_rois = [torch.stack([resnet_roi(roi_img_feat[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
+                enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                 roi_embeds = torch.stack(enc_rois, dim=1)
 
-                # Forward
-                logits = model(enc_X=enc_input_ids, dec_X=dec_input_ids,
-                               visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
-                               token_type_ids=enc_type_ids, attention_mask=enc_mask,
-                               added_attention_mask=added_mask, source_valid_len=valid_lens, is_train=True)
-                
-                loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-                total_test_loss += loss.item()
+                # Loop Aspects
+                for id_asp in range(6):
+                    logits = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp],
+                                   visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
+                                   token_type_ids=all_enc_type[:,id_asp], attention_mask=all_enc_mask[:,id_asp], 
+                                   added_attention_mask=all_add_mask[:,id_asp], is_train=True)
+                    
+                    # Generation
+                    preds = torch.argmax(logits, dim=-1)
+                    decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+                    
+                    # Labels
+                    lbls = all_dec_lbls[:,id_asp].cpu().numpy()
+                    lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
+                    decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
+                    
+                    # Accumulate for logs
+                    for p, g in zip(decoded_preds, decoded_lbls):
+                        all_preds.append(p)
+                        all_labels.append(g)
+                        s = scorer.score(g, p)
+                        all_rouge1.append(s['rouge1'].fmeasure)
+                        all_rougeL.append(s['rougeL'].fmeasure)
 
-                # --- GENERATION FOR METRICS (Greedy Selection) ---
-                preds_batch = torch.argmax(logits, dim=-1)
-                decoded_preds = tokenizer.batch_decode(preds_batch, skip_special_tokens=True)
-                
-                # Clean labels
-                labels_cpu = labels.cpu().numpy()
-                labels_cpu = np.where(labels_cpu != -100, labels_cpu, tokenizer.pad_token_id)
-                decoded_labels = tokenizer.batch_decode(labels_cpu, skip_special_tokens=True)
-
-                all_preds.extend(decoded_preds)
-                all_labels.extend(decoded_labels)
-
-        avg_test_loss = total_test_loss / len(test_dataloader)
+        # Log Statistics
+        avg_r1 = np.mean(all_rouge1)
+        avg_rL = np.mean(all_rougeL)
         
-        # --- [NEW] ROUGE SCORE CALCULATION ---
-        logger.info("Calculating ROUGE Score...")
-        scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
-        
-        r1, r2, rl = [], [], []
-        for pred, label in zip(all_preds, all_labels):
-            scores = scorer.score(label, pred) # score(target, prediction)
-            r1.append(scores['rouge1'].fmeasure)
-            r2.append(scores['rouge2'].fmeasure)
-            rl.append(scores['rougeL'].fmeasure)
-            
-        avg_r1 = np.mean(r1)
-        avg_r2 = np.mean(r2)
-        avg_rl = np.mean(rl)
-
         logger.info(f"***** TEST RESULTS *****")
-        logger.info(f"Test Loss: {avg_test_loss}")
-        logger.info(f"ROUGE-1: {avg_r1}")
-        logger.info(f"ROUGE-2: {avg_r2}")
-        logger.info(f"ROUGE-L: {avg_rl}")
+        logger.info(f"Test ROUGE-1: {avg_r1:.4f}")
+        logger.info(f"Test ROUGE-L: {avg_rL:.4f}")
 
-        with open(f"{args.output_dir}/test_results_iaog.txt", "w") as f:
-            f.write(f"Test Loss: {avg_test_loss}\n")
-            f.write(f"ROUGE-1: {avg_r1}\n")
-            f.write(f"ROUGE-2: {avg_r2}\n")
-            f.write(f"ROUGE-L: {avg_rl}\n")
-            f.write("\n--- Sample Predictions ---\n")
+        # [UPDATED] Save Predictions Log
+        log_path = f"{args.output_dir}/test_predictions_log.txt"
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"TEST METRICS:\n")
+            f.write(f"ROUGE-1: {avg_r1:.4f}\n")
+            f.write(f"ROUGE-L: {avg_rL:.4f}\n")
+            f.write("="*50 + "\n")
+            f.write("PREDICTION vs LABEL\n")
+            f.write("="*50 + "\n")
             for i in range(len(all_preds)):
-                f.write(f"Pred: {all_preds[i]}\nLabel : {all_labels[i]}\n\n")
+                f.write(f"Sample {i}:\n")
+                f.write(f"  Pred:  {all_preds[i]}\n")
+                f.write(f"  Label: {all_labels[i]}\n")
+                f.write("-" * 20 + "\n")
+        
+        logger.info(f"Predictions saved to {log_path}")
 
 if __name__ == '__main__':
     main()
