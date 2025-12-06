@@ -368,7 +368,7 @@ def main():
             return
 
         # Load BEST Checkpoint
-        ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
+        ckpt_path = f'/kaggle/input/iaog-best-6-aspect/pytorch/16_epoch/1/seed_42_iaog_model_best_6_aspect_loss.pth'
         if os.path.exists(ckpt_path):
             logger.info(f"Loading Best Checkpoint: {ckpt_path}")
             ckpt = torch.load(ckpt_path, map_location=device, weight_only=False)
