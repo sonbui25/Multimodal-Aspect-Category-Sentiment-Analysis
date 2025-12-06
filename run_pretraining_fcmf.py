@@ -149,7 +149,7 @@ def main():
     max_rouge1 = 0.0
 
     if args.resume_from_checkpoint and os.path.isfile(args.resume_from_checkpoint):
-        ckpt = torch.load(args.resume_from_checkpoint, map_location=device)
+        ckpt = torch.load(args.resume_from_checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model_state_dict']) if not isinstance(model, DDP) else model.module.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         scheduler.load_state_dict(ckpt['scheduler_state_dict'])
@@ -277,7 +277,7 @@ def main():
         # ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
         ckpt_path = '/kaggle/input/iaog-best-6-aspect/pytorch/16_epoch/1/seed_42_iaog_model_best_6_aspect_loss.pth'
         if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location=device)
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
             else: model.load_state_dict(ckpt['model_state_dict'])
         
