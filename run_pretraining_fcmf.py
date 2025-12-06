@@ -306,19 +306,17 @@ def main():
             resnet_img.train()
             resnet_roi.train()
             optimizer.zero_grad()
-            
-            train_loss = 0
-            
+                        
             # --- Train Step ---
             pbar = tqdm(train_dataloader, disable=not master_process)
             for step, batch in enumerate(pbar):
                 pbar.set_description(f"Epoch {epoch}")
                 # 1. Đưa dữ liệu vào Device
                 batch = tuple(t.to(device) for t in batch)
-                (t_img_features, roi_img_features, roi_coors, labels, 
-                 dec_input_ids, dec_attn_mask, 
-                 enc_input_ids, enc_type_ids, enc_attn_mask, 
-                 added_attn_mask, valid_lens) = batch
+                (t_img_features, roi_img_features, roi_coors, 
+                all_labels, all_dec_input_ids, all_dec_attn_mask, 
+                all_enc_input_ids, all_enc_type_ids, all_enc_attn_mask, 
+                all_added_input_mask, all_valid_lens) = batch
 
                 roi_img_features = roi_img_features.float()
 
@@ -339,37 +337,45 @@ def main():
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
                     # --- Model Forward ---
-                    logits = model(
-                        enc_X=enc_input_ids,
-                        dec_X=dec_input_ids,
-                        visual_embeds_att=vis_embeds,
-                        roi_embeds_att=roi_embeds,
-                        roi_coors=roi_coors,
-                        token_type_ids=enc_type_ids,
-                        attention_mask=enc_attn_mask,
-                        added_attention_mask=added_attn_mask,
-                        source_valid_len=valid_lens,
-                        is_train=True
-                    )
+                    total_loss = 0
+                    # VÒNG LẶP QUA 6 ASPECT (Quan trọng)
+                    # ASPECT = ['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area']
+                    for id_asp in range(6): 
+                        # Lấy slice dữ liệu cho aspect thứ id_asp
+                        enc_input_ids = all_enc_input_ids[:, id_asp, :]
+                        enc_type_ids = all_enc_type_ids[:, id_asp, :]
+                        enc_attn_mask = all_enc_attn_mask[:, id_asp, :]
+                        added_attn_mask = all_added_input_mask[:, id_asp, :]
+                        
+                        dec_input_ids = all_dec_input_ids[:, id_asp, :]
+                        labels = all_labels[:, id_asp, :]
+                        # valid_lens = all_valid_lens[:, id_asp] # Nếu cần dùng cho decoder state init
+
+                        # Forward model cho aspect này
+                        logits = model(
+                            enc_X=enc_input_ids,
+                            dec_X=dec_input_ids,
+                            visual_embeds_att=vis_embeds, # Ảnh dùng chung
+                            roi_embeds_att=roi_embeds,    # ROI dùng chung
+                            roi_coors=roi_coors,
+                            token_type_ids=enc_type_ids,
+                            attention_mask=enc_attn_mask,
+                            added_attention_mask=added_attn_mask,
+                            source_valid_len=None, # Hoặc valid_lens nếu decoder cần
+                            is_train=True
+                        )
+
+                        # Tính Loss thành phần
+                        loss_asp = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+                        total_loss += loss_asp
+
+                    # Backward trên tổng loss
+                    # total_loss = total_loss / 6.0 # Có thể chia trung bình nếu muốn scale loss nhỏ lại
                     
-                    # --- Tính Loss ---
-                    # print(f"Check logits shape: {logits.shape}")
-                    # print(f"Check logits sample: {logits}")
-                    # print(f"Check labels shape: {labels.view(-1).shape}")
-                    # print(f"Check labels sample: {labels.view(-1)}\n\n")
-                    loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-                    
-                    # Chia nhỏ loss nếu dùng Gradient Accumulation
                     if args.gradient_accumulation_steps > 1:
-                        loss = loss / args.gradient_accumulation_steps
-
-                # 3. Backward (Lan truyền ngược)
-                if args.fp16:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
-
-                train_loss += loss.item()
+                        total_loss = total_loss / args.gradient_accumulation_steps
+                        
+                    scaler.scale(total_loss).backward()
 
                 # 4. Optimizer Step (Cập nhật trọng số)
                 if (step + 1) % args.gradient_accumulation_steps == 0:
