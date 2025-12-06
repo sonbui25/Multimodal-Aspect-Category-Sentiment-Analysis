@@ -292,7 +292,7 @@ def main():
             for batch in tqdm(test_loader, desc="Test"):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                 (t_img_f, roi_img_f, roi_coors, all_labels, all_dec_ids, _, 
-                 all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _, _, batch_texts) = batch
+                 all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _, batch_texts) = batch
 
                 # Init storage for this batch
                 batch_results = [{"text": t, "aspects": {}} for t in batch_texts]
