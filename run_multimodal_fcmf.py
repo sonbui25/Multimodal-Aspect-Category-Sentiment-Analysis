@@ -51,7 +51,7 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0):
     }, path)
 
 def load_model(path):
-    check_point = torch.load(path, map_location='cpu')
+    check_point = torch.load(path, map_location='cpu', weights_only=False)
     return check_point
 
 def main():
@@ -336,7 +336,7 @@ def main():
     elif args.pretrained_iaog_path and os.path.isfile(args.pretrained_iaog_path):
         if master_process: logger.info(f"--> Loading Encoder weights from Pretraining: {args.pretrained_iaog_path}")
         
-        iaog_ckpt = torch.load(args.pretrained_iaog_path, map_location='cpu')
+        iaog_ckpt = torch.load(args.pretrained_iaog_path, map_location='cpu', weights_only=False)
         iaog_state_dict = iaog_ckpt['model_state_dict']
         
         # Filter keys: Keep only 'encoder.' keys

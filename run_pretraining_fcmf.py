@@ -274,8 +274,8 @@ def main():
         except: return
 
         # Load Best
-        # ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
-        ckpt_path = '/kaggle/input/iaog-best-6-aspect/pytorch/16_epoch/1/seed_42_iaog_model_best_6_aspect_loss.pth'
+        ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
+        # ckpt_path = '/kaggle/input/iaog-best-6-aspect/pytorch/16_epoch/1/seed_42_iaog_model_best_6_aspect_loss.pth'
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
