@@ -36,20 +36,26 @@ def macro_f1(y_true, y_pred):
       = precision_recall_fscore_support(y_true, y_pred, average='macro', zero_division=0.0)
     return p_macro, r_macro, f_macro
 
-def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0):
+def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0, scaler=None):
     if hasattr(model, 'module'):
         model_state = model.module.state_dict()
     else:
         model_state = model.state_dict()
         
-    torch.save({
+    checkpoint_dict = {
         "epoch": epoch,
         "best_score": best_score,
         "model_state_dict": model_state,
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
-    }, path)
+    }
+    
+    # [THÊM MỚI] Lưu trạng thái scaler nếu có
+    if scaler is not None:
+        checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
 
+    torch.save(checkpoint_dict, path)
+    
 def load_model(path):
     check_point = torch.load(path, map_location='cpu')
     return check_point
@@ -90,7 +96,8 @@ def main():
     
     parser.add_argument("--train_batch_size", default=8, type=int, help="Total batch size for training.")
     parser.add_argument("--eval_batch_size", default=8, type=int, help="Total batch size for eval.")
-    parser.add_argument("--learning_rate", default=3e-5, type=float, help="The initial learning rate for AdamW.")
+    parser.add_argument("--encoder_lr", default=7e-5, type=float, help="The initial learning rate for encoder.")
+    parser.add_argument("--classifier_head_lr", default=7e-4, type=float, help="The initial learning rate for classifier head.")
     parser.add_argument("--num_train_epochs", default=8.0, type=float, help="Total number of training epochs.")
     parser.add_argument("--warmup_proportion", default=0.1, type=float, help="Proportion of training to perform linear learning rate warmup.")
     
@@ -239,33 +246,35 @@ def main():
     optimizer_grouped_parameters = [
         # Encoder Group: Low LR
         {
-            'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
+            'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)], # For weights
             'weight_decay': 0.01,
-            'lr': 7e-5 
+            'lr': args.encoder_lr 
         },
         {
-            'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)],
+            'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
             'weight_decay': 0.0,
-            'lr': 7e-5
+            'lr': args.encoder_lr
         },
         # Head Group: Higher LR
         {
-            'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)],
+            'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)], # For weights
             'weight_decay': 0.01,
-            'lr': 7e-4 
+            'lr': args.classifier_head_lr 
         },
         {
-            'params': [p for n, p in head_params if any(nd in n for nd in no_decay)],
+            'params': [p for n, p in head_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
             'weight_decay': 0.0,
-            'lr': 7e-4
+            'lr': args.classifier_head_lr
         }
     ]
 
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.classifier_head_lr)
     criterion = torch.nn.CrossEntropyLoss()
     
     if args.fp16:
         scaler = torch.amp.GradScaler('cuda') 
+    else:
+        scaler = None
 
     num_train_steps = 0
     if args.do_train:
@@ -279,36 +288,56 @@ def main():
     start_epoch = 0
     max_f1 = 0.0
 
-    # A. RESUME
+   # A. RESUME
     if args.resume_from_checkpoint:
         checkpoint_path = args.resume_from_checkpoint
         if os.path.isfile(checkpoint_path):
             if master_process: logger.info(f"--> Resuming from checkpoint: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            # Load checkpoint
+            checkpoint = torch.load(checkpoint_path, map_location=device)
             
+            # 1. Load Model Weights (Giữ nguyên)
             if isinstance(model, (DDP, torch.nn.DataParallel)):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
             else:
                 model.load_state_dict(checkpoint['model_state_dict'])
             
+            # 2. Load ResNet Weights (Sửa lại cho an toàn hơn)
+            # Thử đoán tên file ResNet dựa trên tên file checkpoint chính
+            dir_name = os.path.dirname(checkpoint_path)
+            # Giả sử file checkpoint là "..._fcmf_model_last.pth"
             resimg_path = checkpoint_path.replace("fcmf_model", "resimg_model")
             resroi_path = checkpoint_path.replace("fcmf_model", "resroi_model")
             
             if os.path.exists(resimg_path):
+                if master_process: logger.info(f"    Loading ResNet Image from: {resimg_path}")
                 resimg_ckpt = torch.load(resimg_path, map_location=device)
                 unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
                 unwrap_resimg.load_state_dict(resimg_ckpt['model_state_dict'])
                 
             if os.path.exists(resroi_path):
+                if master_process: logger.info(f"    Loading ResNet RoI from: {resroi_path}")
                 resroi_ckpt = torch.load(resroi_path, map_location=device)
                 unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
                 unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
 
+            # 3. Load Optimizer (NÊN LOAD để giữ Momentum)
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            # [QUAN TRỌNG - SỬA ĐỔI] KHÔNG LOAD SCHEDULER CŨ
+            # scheduler.load_state_dict(checkpoint['scheduler_state_dict']) 
+            if master_process: logger.info("--> SKIP loading scheduler state to reset Learning Rate for fine-tuning.")
+
+            # 4. Load Scaler (Nếu có, để fix lỗi FP16)
+            if args.fp16 and 'scaler_state_dict' in checkpoint and 'scaler' in locals():
+                scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                if master_process: logger.info("--> Scaler state loaded.")
+
+            # 5. Set epoch bắt đầu
             start_epoch = checkpoint['epoch'] + 1
             max_f1 = checkpoint.get('best_score', 0.0)
-            if master_process: logger.info(f"--> Resumed successfully from Epoch {start_epoch} with Max F1: {max_f1}")
+            
+            if master_process: logger.info(f"--> Resumed successfully. Starting from Epoch {start_epoch}. Previous Best F1: {max_f1}")
         else:
             if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
 
@@ -404,7 +433,15 @@ def main():
                             else: optimizer.step()
                             scheduler.step(); optimizer.zero_grad()
                             tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
-
+                        if master_process:
+                        # Lấy LR hiện tại từ Optimizer (nhóm 0 là Encoder, nhóm 2 là Classifier Head)
+                        # Lưu ý: Code của config 4 nhóm param, nhóm 0&1 là encoder, 2&3 là head, nên lấy 0 và 2 vì giá trị lr giống nhau trong mỗi nhóm
+                            current_encoder_lr = optimizer.param_groups[0]['lr']
+                            current_head_lr = optimizer.param_groups[2]['lr']
+                            logger.info(f"--> Epoch {train_idx} Completed.")
+                            logger.info(f"    Current Encoder LR: {current_encoder_lr:.2e}")
+                            logger.info(f"    Current Head LR:    {current_head_lr:.2e}")
+                            
             # --- Evaluation ---
             if master_process and args.do_eval:
                 logger.info("***** Running evaluation on Dev Set *****")
@@ -464,14 +501,13 @@ def main():
                 if avg_f1 > max_f1:
                     max_f1 = avg_f1
                     logger.info(f"  New Best F1 ({max_f1})! Saving best model...")
-                    save_model(f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth', model, optimizer, scheduler, train_idx, best_score=max_f1)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, train_idx)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, train_idx)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth', model, optimizer, scheduler, train_idx, best_score=max_f1, scaler=scaler if args.fp16 else None)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, train_idx, scaler=scaler if args.fp16 else None)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, train_idx, scaler=scaler if args.fp16 else None)
 
-                save_model(f'{args.output_dir}/seed_{args.seed}_fcmf_model_last.pth', model, optimizer, scheduler, train_idx, best_score=max_f1)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, train_idx)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, train_idx)
-
+                save_model(f'{args.output_dir}/seed_{args.seed}_fcmf_model_last.pth', model, optimizer, scheduler, train_idx, best_score=max_f1, scaler=scaler if args.fp16 else None)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, train_idx, scaler=scaler if args.fp16 else None)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, train_idx, scaler=scaler if args.fp16 else None)
     # ==========================================================================================
     # 7. TEST EVALUATION (With Detailed Logging)
     # ==========================================================================================
