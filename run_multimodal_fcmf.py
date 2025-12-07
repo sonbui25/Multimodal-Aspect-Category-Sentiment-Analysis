@@ -96,8 +96,8 @@ def main():
     
     parser.add_argument("--train_batch_size", default=8, type=int, help="Total batch size for training.")
     parser.add_argument("--eval_batch_size", default=8, type=int, help="Total batch size for eval.")
-    parser.add_argument("--encoder_lr", default=7e-5, type=float, help="The initial learning rate for encoder.")
-    parser.add_argument("--classifier_head_lr", default=7e-4, type=float, help="The initial learning rate for classifier head.")
+    parser.add_argument("--encoder_learning_rate", default=7e-5, type=float, help="The initial learning rate for encoder.")
+    parser.add_argument("--classifier_head_learning_rate", default=7e-4, type=float, help="The initial learning rate for classifier head.")
     parser.add_argument("--num_train_epochs", default=8.0, type=float, help="Total number of training epochs.")
     parser.add_argument("--warmup_proportion", default=0.1, type=float, help="Proportion of training to perform linear learning rate warmup.")
     
@@ -248,27 +248,27 @@ def main():
         {
             'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)], # For weights
             'weight_decay': 0.01,
-            'lr': args.encoder_lr 
+            'lr': args.encoder_learning_rate 
         },
         {
             'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
             'weight_decay': 0.0,
-            'lr': args.encoder_lr
+            'lr': args.encoder_learning_rate
         },
         # Head Group: Higher LR
         {
             'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)], # For weights
             'weight_decay': 0.01,
-            'lr': args.classifier_head_lr 
+            'lr': args.classifier_head_learning_rate 
         },
         {
             'params': [p for n, p in head_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
             'weight_decay': 0.0,
-            'lr': args.classifier_head_lr
+            'lr': args.classifier_head_learning_rate
         }
     ]
 
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.classifier_head_lr)
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.classifier_head_learning_rate)
     criterion = torch.nn.CrossEntropyLoss()
     
     if args.fp16:
@@ -436,10 +436,10 @@ def main():
                         if master_process:
                         # Lấy LR hiện tại từ Optimizer (nhóm 0 là Encoder, nhóm 2 là Classifier Head)
                         # Lưu ý: Code của config 4 nhóm param, nhóm 0&1 là encoder, 2&3 là head, nên lấy 0 và 2 vì giá trị lr giống nhau trong mỗi nhóm
-                            current_encoder_lr = optimizer.param_groups[0]['lr']
+                            current_encoder_learning_rate = optimizer.param_groups[0]['lr']
                             current_head_lr = optimizer.param_groups[2]['lr']
                             logger.info(f"--> Epoch {train_idx} Completed.")
-                            logger.info(f"    Current Encoder LR: {current_encoder_lr:.2e}")
+                            logger.info(f"    Current Encoder LR: {current_encoder_learning_rate:.2e}")
                             logger.info(f"    Current Head LR:    {current_head_lr:.2e}")
                             
             # --- Evaluation ---
