@@ -432,16 +432,16 @@ def main():
                             if args.fp16: scaler.step(optimizer); scaler.update()
                             else: optimizer.step()
                             scheduler.step(); optimizer.zero_grad()
-                            tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
-                        if master_process:
-                        # Lấy LR hiện tại từ Optimizer (nhóm 0 là Encoder, nhóm 2 là Classifier Head)
-                        # Lưu ý: Code của config 4 nhóm param, nhóm 0&1 là encoder, 2&3 là head, nên lấy 0 và 2 vì giá trị lr giống nhau trong mỗi nhóm
-                            current_encoder_learning_rate = optimizer.param_groups[0]['lr']
-                            current_head_lr = optimizer.param_groups[2]['lr']
-                            logger.info(f"--> Epoch {train_idx} Completed.")
-                            logger.info(f"    Current Encoder LR: {current_encoder_learning_rate:.2e}")
-                            logger.info(f"    Current Head LR:    {current_head_lr:.2e}")
-                            
+                        tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
+            if master_process:
+            # Lấy LR hiện tại từ Optimizer (nhóm 0 là Encoder, nhóm 2 là Classifier Head)
+            # Lưu ý: Code của config 4 nhóm param, nhóm 0&1 là encoder, 2&3 là head, nên lấy 0 và 2 vì giá trị lr giống nhau trong mỗi nhóm
+                current_encoder_learning_rate = optimizer.param_groups[0]['lr']
+                current_head_lr = optimizer.param_groups[2]['lr']
+                logger.info(f"--> Epoch {train_idx} Completed.")
+                logger.info(f"    Current Encoder LR: {current_encoder_learning_rate:.2e}")
+                logger.info(f"    Current Head LR:    {current_head_lr:.2e}")
+                    
             # --- Evaluation ---
             if master_process and args.do_eval:
                 logger.info("***** Running evaluation on Dev Set *****")
