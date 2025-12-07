@@ -411,8 +411,16 @@ def main():
                         t_img_features, roi_img_features, roi_coors, \
                         all_input_ids, all_token_types_ids, all_attn_mask, \
                         all_added_input_mask, all_label_id, _ = batch # _ for text
-
-                        # ... Feature Extraction (same as training) ...
+                        
+                        t_img_features = t_img_features.to(device)
+                        roi_img_features = roi_img_features.float().to(device)
+                        roi_coors = roi_coors.to(device)
+                        all_input_ids = all_input_ids.to(device)
+                        all_token_types_ids = all_token_types_ids.to(device)
+                        all_attn_mask = all_attn_mask.to(device)
+                        all_added_input_mask = all_added_input_mask.to(device)
+                        all_label_id = all_label_id.to(device)
+                        # Feature Extraction
                         encoded_img = []
                         for img_idx in range(args.num_imgs):
                             img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
