@@ -23,6 +23,9 @@ import json
 from torch.cuda.amp import autocast
 import os
 
+# Định nghĩa map label
+POLARITY_MAP = {0: 'None', 1: 'Negative', 2: 'Neutral', 3: 'Positive'}
+
 def warmup_linear(x, warmup=0.002):
     if x < warmup:
         return x/warmup
@@ -34,9 +37,6 @@ def macro_f1(y_true, y_pred):
     return p_macro, r_macro, f_macro
 
 def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0):
-    """
-    Save full checkpoint for resuming or testing.
-    """
     if hasattr(model, 'module'):
         model_state = model.module.state_dict()
     else:
@@ -162,8 +162,6 @@ def main():
     # ==========================================================================================
     try:
         tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
-        # [CRITICAL] Add <iaog> token to match the vocab size of the Pretrained Encoder
-        # If we don't do this, loading weights will fail due to size mismatch.
         special_tokens = {'additional_special_tokens': ['<iaog>']}
         tokenizer.add_special_tokens(special_tokens)
     except:
@@ -205,8 +203,6 @@ def main():
                  num_roi=args.num_rois,
                  alpha=args.alpha)
     
-    # [IMPORTANT] Resize embedding to match tokenizer (including <iaog>)
-    # This ensures the model structure matches the pretrained encoder weights
     model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
 
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
@@ -229,13 +225,8 @@ def main():
     # 4. OPTIMIZER & SCHEDULER
     # ==========================================================================================
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    # 1. Tách tham số của Encoder (cần bảo toàn kiến thức) và Classifier (cần học nhanh)
-    # Trong fcmf_multimodal.py, tên các module là: self.encoder, self.text_pooler, self.classifier
-    
     encoder_params = []
     head_params = []
-    
-    # Liệt kê tên các module thuộc phần Head
     head_names = ['classifier', 'text_pooler'] 
     
     for n, p in model.named_parameters():
@@ -244,27 +235,21 @@ def main():
         else:
             encoder_params.append((n, p))
 
-    # 2. Thiết lập Learning Rate riêng biệt
-    # LR cho Encoder nhỏ (ví dụ 1e-5) để tránh Catastrophic Forgetting
-    # LR cho Head lớn (ví dụ 1e-4 hoặc 5e-4) để hội tụ nhanh
-    
     optimizer_grouped_parameters = [
-        # Nhóm Encoder: LR thấp
         {
             'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
-            'lr': 7e-5  # <--- QUAN TRỌNG: LR thấp hơn config gốc
+            'lr': 7e-5 
         },
         {
             'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)],
             'weight_decay': 0.0,
             'lr': 7e-5
         },
-        # Nhóm Head (Classifier): LR cao
         {
             'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
-            'lr': 7e-4 # <--- QUAN TRỌNG: LR cao hơn (gấp 10 lần encoder)
+            'lr': 7e-4 
         },
         {
             'params': [p for n, p in head_params if any(nd in n for nd in no_decay)],
@@ -273,12 +258,11 @@ def main():
         }
     ]
 
-    # Lưu ý: Khi khởi tạo optimizer, tham số lr ở đây chỉ là default, sẽ bị ghi đè bởi lr trong groups
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
     criterion = torch.nn.CrossEntropyLoss()
     
     if args.fp16:
-        scaler = torch.amp.GradScaler('cuda') # Or scaler = torch.amp.GradScaler('cuda') for newer torch versions
+        scaler = torch.amp.GradScaler('cuda') 
 
     num_train_steps = 0
     if args.do_train:
@@ -287,74 +271,59 @@ def main():
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_train_steps*args.warmup_proportion, num_training_steps=num_train_steps)
 
     # ==========================================================================================
-    # 5. CHECKPOINT LOADING (RESUME or PRETRAIN)
+    # 5. CHECKPOINT LOADING
     # ==========================================================================================
     start_epoch = 0
     max_f1 = 0.0
 
-    # A. Case 1: RESUME from a crash (Priority)
     if args.resume_from_checkpoint:
         checkpoint_path = args.resume_from_checkpoint
         if os.path.isfile(checkpoint_path):
             if master_process: logger.info(f"--> Resuming from checkpoint: {checkpoint_path}")
-            
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
-            # Load Model Weights
             if isinstance(model, (DDP, torch.nn.DataParallel)):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
             else:
                 model.load_state_dict(checkpoint['model_state_dict'])
             
-            # Load ResNets (Assuming naming convention)
+            # Load ResNets
             resimg_path = checkpoint_path.replace("fcmf_model", "resimg_model")
             resroi_path = checkpoint_path.replace("fcmf_model", "resroi_model")
             
             if os.path.exists(resimg_path):
-                logger.info(f"--> Loading ResNet Image weights from: {resimg_path}")
                 resimg_ckpt = torch.load(resimg_path, map_location=device)
                 unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
                 unwrap_resimg.load_state_dict(resimg_ckpt['model_state_dict'])
                 
             if os.path.exists(resroi_path):
-                logger.info(f"--> Loading ResNet RoI weights from: {resroi_path}")
                 resroi_ckpt = torch.load(resroi_path, map_location=device)
                 unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
                 unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
 
-            # Restore State
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             max_f1 = checkpoint.get('best_score', 0.0)
-            
             if master_process: logger.info(f"--> Resumed successfully from Epoch {start_epoch} with Max F1: {max_f1}")
         else:
             if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
 
-    # B. Case 2: NEW TRAINING but load ENCODER from IAOG Pretraining
     elif args.pretrained_iaog_path and os.path.isfile(args.pretrained_iaog_path):
         if master_process: logger.info(f"--> Loading Encoder weights from Pretraining: {args.pretrained_iaog_path}")
-        
         iaog_ckpt = torch.load(args.pretrained_iaog_path, map_location='cpu', weights_only=False)
         iaog_state_dict = iaog_ckpt['model_state_dict']
-        
-        # Filter keys: Keep only 'encoder.' keys
-        encoder_state_dict = {}
-        for k, v in iaog_state_dict.items():
-            if k.startswith('encoder.'):
-                encoder_state_dict[k] = v
-        
-        # Load into current model (strict=False to ignore classifier/pooler mismatch)
-        model_to_load = model.module if hasattr(model, 'module') else model # model_to_load is the the model used to load weights for FCMF
-        missing_keys, unexpected_keys = model_to_load.load_state_dict(encoder_state_dict, strict=False) # Load encoder weights for FCMF by model_to_load    
+        encoder_state_dict = {k: v for k, v in iaog_state_dict.items() if k.startswith('encoder.')}
+        model_to_load = model.module if hasattr(model, 'module') else model 
+        missing_keys, unexpected_keys = model_to_load.load_state_dict(encoder_state_dict, strict=False) 
         
         if master_process: 
             logger.info(f"--> Pretrained Encoder loaded successfully.")
             logger.info(f"    Keys loaded: {len(encoder_state_dict)}")
-            logger.info(f"    Missing keys (expected): {len(missing_keys)}") # Classifier/Pooler keys
+            logger.info(f"    Missing keys (expected): {len(missing_keys)}")
     else:
         if master_process: logger.info("--> No checkpoint or pretrained IAOG path provided. Training from scratch.")
+
     # ==========================================================================================
     # 6. TRAINING LOOP
     # ==========================================================================================
@@ -368,37 +337,25 @@ def main():
         train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
         dev_dataloader = DataLoader(dev_dataset, sampler=dev_sampler, batch_size=args.eval_batch_size)
 
-        global_step = start_epoch * len(train_dataloader)
-
         for train_idx in range(start_epoch, int(args.num_train_epochs)):
             if args.ddp: train_sampler.set_epoch(train_idx)
-            
             if master_process: logger.info(f"********** Epoch: {train_idx} **********")
             
-            model.train()
-            resnet_img.train()
-            resnet_roi.train()
+            model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
 
             with tqdm(train_dataloader, position=0, leave=True, disable=not master_process, dynamic_ncols=True) as tepoch:
                 for step, batch in enumerate(tepoch):
                     tepoch.set_description(f"Epoch {train_idx}")
+                    # [CHANGE] Unpack thêm batch_text
+                    batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
+                    (t_img_features, roi_img_features, roi_coors, 
+                    all_input_ids, all_token_types_ids, all_attn_mask, 
+                    all_added_input_mask, all_label_id, batch_texts) = batch
 
-                    t_img_features, roi_img_features, roi_coors, \
-                    all_input_ids, all_token_types_ids, all_attn_mask, \
-                    all_added_input_mask, all_label_id = batch
-
-                    t_img_features = t_img_features.to(device)
-                    roi_img_features = roi_img_features.float().to(device)
-                    roi_coors = roi_coors.to(device)
-                    all_input_ids = all_input_ids.to(device)
-                    all_token_types_ids = all_token_types_ids.to(device)
-                    all_attn_mask = all_attn_mask.to(device)
-                    all_added_input_mask = all_added_input_mask.to(device)
-                    all_label_id = all_label_id.to(device)
+                    roi_img_features = roi_img_features.float()
 
                     with torch.amp.autocast('cuda', enabled=args.fp16):
-                        # Feature Extract
                         encoded_img = []
                         for img_idx in range(args.num_imgs):
                             img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
@@ -412,8 +369,6 @@ def main():
                         vis_embeds = torch.stack(encoded_img, dim=1)
                         roi_embeds = torch.stack(encoded_roi, dim=1)
 
-                        # Train Loop for each Aspect
-                        # Train Loop for each Aspect
                         all_asp_loss = 0
                         for id_asp in range(len(ASPECT)):
                             logits = model(
@@ -425,76 +380,39 @@ def main():
                                 roi_embeds_att=roi_embeds,
                                 roi_coors=roi_coors
                             )
-                            
-                            # Tính loss thành phần
                             loss = criterion(logits, all_label_id[:,id_asp])
                             all_asp_loss += loss
 
-                        # Chia trung bình loss trước khi backward (Gradient Accumulation)
                         if args.gradient_accumulation_steps > 1:
                             all_asp_loss = all_asp_loss / args.gradient_accumulation_steps
 
-                        # Backward
-                        if args.fp16:
-                            scaler.scale(all_asp_loss).backward()
-                        else:
-                            all_asp_loss.backward()
+                        if args.fp16: scaler.scale(all_asp_loss).backward()
+                        else: all_asp_loss.backward()
 
-                        # Optimizer Step
                         if (step + 1) % args.gradient_accumulation_steps == 0:
-                            
-                            # Unscale & Clip (Best Practice)
-                            if args.fp16:
-                                scaler.unscale_(optimizer)
-                            
+                            if args.fp16: scaler.unscale_(optimizer)
                             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                            
-                            if args.fine_tune_cnn:
-                                torch.nn.utils.clip_grad_norm_(resnet_img.parameters(), 1.0)
-                                torch.nn.utils.clip_grad_norm_(resnet_roi.parameters(), 1.0)
-
-                            # Update Weights
-                            if args.fp16:
-                                scaler.step(optimizer)
-                                scaler.update()
-                            else:
-                                optimizer.step()
-                            
-                            scheduler.step()
-                            optimizer.zero_grad()
-                            global_step += 1
-                            
-                            # Hiển thị Loss thực tế
+                            if args.fp16: scaler.step(optimizer); scaler.update()
+                            else: optimizer.step()
+                            scheduler.step(); optimizer.zero_grad()
                             tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
-                            # Ghi log liên tục mà không ảnh hưởng đến thanh tqdm
-                            tqdm.write(f"\033[1;32mEpoch {train_idx}, Step {step}, Loss: {all_asp_loss.item()}\033[0m")
-            # --- Evaluation (End of Epoch) ---
+
+            # --- Evaluation ---
             if master_process and args.do_eval:
                 logger.info("***** Running evaluation on Dev Set *****")
-                model.eval()
-                resnet_img.eval()
-                resnet_roi.eval()
-                
+                model.eval(); resnet_img.eval(); resnet_roi.eval()
                 true_label_list = {asp:[] for asp in ASPECT}
                 pred_label_list = {asp:[] for asp in ASPECT}
                 idx2asp = {i:v for i,v in enumerate(ASPECT)}
 
                 with torch.no_grad():
                     for batch in tqdm(dev_dataloader, desc="Evaluating Dev", leave=False):
+                        batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                         t_img_features, roi_img_features, roi_coors, \
                         all_input_ids, all_token_types_ids, all_attn_mask, \
-                        all_added_input_mask, all_label_id = batch
+                        all_added_input_mask, all_label_id, _ = batch # _ for text
 
-                        t_img_features = t_img_features.to(device)
-                        roi_img_features = roi_img_features.float().to(device)
-                        roi_coors = roi_coors.to(device)
-                        all_input_ids = all_input_ids.to(device)
-                        all_token_types_ids = all_token_types_ids.to(device)
-                        all_attn_mask = all_attn_mask.to(device)
-                        all_added_input_mask = all_added_input_mask.to(device)
-                        all_label_id = all_label_id.to(device)
-
-                         # Feature Extract
+                        # ... Feature Extraction (same as training) ...
                         encoded_img = []
                         for img_idx in range(args.num_imgs):
                             img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
@@ -518,13 +436,11 @@ def main():
                                 roi_embeds_att=roi_embeds,
                                 roi_coors=roi_coors
                             )
-                            
                             pred = np.argmax(logits.detach().cpu().numpy(), axis=-1)
                             label = all_label_id[:,id_asp].cpu().numpy()
                             true_label_list[idx2asp[id_asp]].append(label)
                             pred_label_list[idx2asp[id_asp]].append(pred)
 
-                # Calculate Metrics
                 all_f1 = 0
                 for id_asp in range(len(ASPECT)):
                     tr = np.concatenate(true_label_list[idx2asp[id_asp]])
@@ -535,7 +451,6 @@ def main():
                 avg_f1 = all_f1 / len(ASPECT)
                 logger.info(f"  Dev Macro-F1: {avg_f1}")
 
-                # Save BEST model
                 if avg_f1 > max_f1:
                     max_f1 = avg_f1
                     logger.info(f"  New Best F1 ({max_f1})! Saving best model...")
@@ -543,84 +458,80 @@ def main():
                     save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, train_idx)
                     save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, train_idx)
 
-                # Save LATEST model
-                logger.info("  Saving latest checkpoint for resume...")
                 save_model(f'{args.output_dir}/seed_{args.seed}_fcmf_model_last.pth', model, optimizer, scheduler, train_idx, best_score=max_f1)
                 save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, train_idx)
                 save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, train_idx)
 
     # ==========================================================================================
-    # 7. TEST EVALUATION (FULL)
+    # 7. TEST EVALUATION (With Formatted Logging)
     # ==========================================================================================
     if args.do_eval and master_process:
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
         
-        # Load Test Data
         test_data = pd.read_json(f'{args.data_dir}/test.json')
         test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         test_dataset = MACSADataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
-        # Load BEST Model
         best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device, weights_only=False)
-            
             if isinstance(model, (DDP, torch.nn.DataParallel)):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
             else:
                 model.load_state_dict(checkpoint['model_state_dict'])
-                
-            # Load ResNets
-            rimg_ckpt = torch.load(best_path.replace("fcmf", "resimg"), map_location=device)
-            unwrap_rimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
-            unwrap_rimg.load_state_dict(rimg_ckpt['model_state_dict'])
             
-            rroi_ckpt = torch.load(best_path.replace("fcmf", "resroi"), map_location=device)
-            unwrap_rroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
-            unwrap_rroi.load_state_dict(rroi_ckpt['model_state_dict'])
+            # Load ResNet Checkpoints as well (optional but recommended for consistency)
+            rimg_path = best_path.replace("fcmf", "resimg")
+            if os.path.exists(rimg_path):
+                rimg_ckpt = torch.load(rimg_path, map_location=device)
+                unwrap_rimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
+                unwrap_rimg.load_state_dict(rimg_ckpt['model_state_dict'])
+                
+            rroi_path = best_path.replace("fcmf", "resroi")
+            if os.path.exists(rroi_path):
+                rroi_ckpt = torch.load(rroi_path, map_location=device)
+                unwrap_rroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
+                unwrap_rroi.load_state_dict(rroi_ckpt['model_state_dict'])
         else:
             logger.warning("No best model found! Using current weights.")
 
-        model.eval()
-        resnet_img.eval()
-        resnet_roi.eval()
+        model.eval(); resnet_img.eval(); resnet_roi.eval()
 
         true_label_list = {asp:[] for asp in ASPECT}
         pred_label_list = {asp:[] for asp in ASPECT}
         idx2asp = {i:v for i,v in enumerate(ASPECT)}
+        
+        # [NEW] List to store detailed results
+        formatted_results = []
 
         with torch.no_grad():
             for batch in tqdm(test_dataloader, desc="Evaluating Test"):
-                t_img_features, roi_img_features, roi_coors, \
-                all_input_ids, all_token_types_ids, all_attn_mask, \
-                all_added_input_mask, all_label_id = batch
+                # Unpack bao gồm text
+                batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
+                (t_img_features, roi_img_features, roi_coors, 
+                all_input_ids, all_token_types_ids, all_attn_mask, 
+                all_added_input_mask, all_label_id, batch_texts) = batch
 
-                t_img_features = t_img_features.to(device)
-                roi_img_features = roi_img_features.float().to(device)
-                roi_coors = roi_coors.to(device)
-                all_input_ids = all_input_ids.to(device)
-                all_token_types_ids = all_token_types_ids.to(device)
-                all_attn_mask = all_attn_mask.to(device)
-                all_added_input_mask = all_added_input_mask.to(device)
-                all_label_id = all_label_id.to(device)
-
-                # Feature Extract
+                # ... Feature Extract (same as before) ...
                 encoded_img = []
                 for img_idx in range(args.num_imgs):
                     img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
                     encoded_img.append(img_f)
-                
                 encoded_roi = []
                 for img_idx in range(args.num_imgs):
                     roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
                     encoded_roi.append(torch.stack(roi_list, dim=1))
-                
                 vis_embeds = torch.stack(encoded_img, dim=1)
                 roi_embeds = torch.stack(encoded_roi, dim=1)
 
+                # Initialize storage for current batch
+                batch_sample_logs = [{"text": t, "aspects": {}} for t in batch_texts]
+
                 for id_asp in range(len(ASPECT)):
+                    aspect_name = ASPECT[id_asp]
+                    
                     logits = model(
                         input_ids=all_input_ids[:,id_asp,:],
                         token_type_ids=all_token_types_ids[:,id_asp,:],
@@ -630,33 +541,56 @@ def main():
                         roi_embeds_att=roi_embeds,
                         roi_coors=roi_coors
                     )
-                    pred = np.argmax(logits.detach().cpu().numpy(), axis=-1)
-                    label = all_label_id[:,id_asp].cpu().numpy()
-                    true_label_list[idx2asp[id_asp]].append(label)
-                    pred_label_list[idx2asp[id_asp]].append(pred)
+                    preds = np.argmax(logits.detach().cpu().numpy(), axis=-1)
+                    labels = all_label_id[:,id_asp].cpu().numpy()
+                    
+                    # Accumulate for F1 calc
+                    true_label_list[aspect_name].append(labels)
+                    pred_label_list[aspect_name].append(preds)
+                    
+                    # Store detailed log
+                    for i, (p, l) in enumerate(zip(preds, labels)):
+                        batch_sample_logs[i]["aspects"][aspect_name] = {
+                            "predict": POLARITY_MAP.get(p, "Unknown"),
+                            "label": POLARITY_MAP.get(l, "Unknown")
+                        }
+                
+                formatted_results.extend(batch_sample_logs)
 
-        # Final Metrics
+        # 1. Calc & Save Metrics
         output_eval_file = os.path.join(args.output_dir, "test_results_fcmf.txt")
         with open(output_eval_file, "w") as writer:
             writer.write("***** Test results *****\n")
             all_f1 = 0
-            all_precision = 0
-            all_recall = 0
             for id_asp in range(len(ASPECT)):
                 tr = np.concatenate(true_label_list[idx2asp[id_asp]])
                 pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
                 precision, recall, f1 = macro_f1(tr, pr)
                 all_f1 += f1
-                all_precision += precision
-                all_recall += recall
                 writer.write(f"{idx2asp[id_asp]} - P: {precision:.4f}, R: {recall:.4f}, F1: {f1:.4f}\n")
                 logger.info(f"{idx2asp[id_asp]} - F1: {f1:.4f}")
-            
             avg_f1 = all_f1 / len(ASPECT)
-            avg_precision = all_precision / len(ASPECT)
-            avg_recall = all_recall / len(ASPECT)
-            writer.write(f"Average - P: {avg_precision:.4f}, R: {avg_recall:.4f}, F1: {avg_f1:.4f}\n")
-            logger.info(f"Average - P: {avg_precision:.4f}, R: {avg_recall:.4f}, F1: {avg_f1:.4f}")
+            writer.write(f"Average F1: {avg_f1:.4f}\n")
+            logger.info(f"Average F1: {avg_f1:.4f}")
+
+        # 2. Save Formatted Log
+        log_path = f"{args.output_dir}/test_predictions_formatted.txt"
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"TEST DETAILED PREDICTIONS\n")
+            f.write(f"Average Macro F1: {avg_f1:.4f}\n")
+            f.write("="*50 + "\n\n")
+            
+            for i, sample in enumerate(formatted_results):
+                f.write("{\n")
+                f.write(f"Sentence {i}: {sample['text']}\n")
+                for asp in ASPECT:
+                    res = sample['aspects'].get(asp, {'predict': 'N/A', 'label': 'N/A'})
+                    f.write(f"{asp}:\n")
+                    f.write(f"   predict: {res['predict']}\n")
+                    f.write(f"   label:   {res['label']}\n")
+                f.write("}\n")
+        
+        logger.info(f"Formatted predictions saved to {log_path}")
 
 if __name__ == '__main__':
     main()
