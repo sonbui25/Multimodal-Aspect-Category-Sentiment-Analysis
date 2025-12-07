@@ -23,7 +23,7 @@ import json
 from torch.cuda.amp import autocast
 import os
 
-# Định nghĩa map label
+# Map numeric labels back to string for logging
 POLARITY_MAP = {0: 'None', 1: 'Negative', 2: 'Neutral', 3: 'Positive'}
 
 def warmup_linear(x, warmup=0.002):
@@ -51,7 +51,7 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0):
     }, path)
 
 def load_model(path):
-    check_point = torch.load(path, map_location='cpu', weights_only=False)
+    check_point = torch.load(path, map_location='cpu')
     return check_point
 
 def main():
@@ -69,11 +69,11 @@ def main():
     parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True,
                         help="Pre-trained huggingface model and tokenizer (e.g. xlm-roberta-base).")
     
-    # [NEW] Load Encoder weights from IAOG Pretraining
+    # [NEW] Argument to load the Encoder weights from the IAOG Pretraining phase
     parser.add_argument("--pretrained_iaog_path", default=None, type=str,
                         help="Path to the IAOG best checkpoint to initialize Encoder weights from.")
     
-    # [NEW] Resume training from checkpoint
+    # [NEW] Argument to resume training from a specific checkpoint
     parser.add_argument("--resume_from_checkpoint", default=None, type=str,
                         help="Path to the checkpoint .pth file to resume training from.")
 
@@ -203,6 +203,7 @@ def main():
                  num_roi=args.num_rois,
                  alpha=args.alpha)
     
+    # [IMPORTANT] Resize embedding to match tokenizer
     model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
 
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
@@ -236,6 +237,7 @@ def main():
             encoder_params.append((n, p))
 
     optimizer_grouped_parameters = [
+        # Encoder Group: Low LR
         {
             'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
@@ -246,6 +248,7 @@ def main():
             'weight_decay': 0.0,
             'lr': 7e-5
         },
+        # Head Group: Higher LR
         {
             'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
@@ -276,6 +279,7 @@ def main():
     start_epoch = 0
     max_f1 = 0.0
 
+    # A. RESUME
     if args.resume_from_checkpoint:
         checkpoint_path = args.resume_from_checkpoint
         if os.path.isfile(checkpoint_path):
@@ -287,7 +291,6 @@ def main():
             else:
                 model.load_state_dict(checkpoint['model_state_dict'])
             
-            # Load ResNets
             resimg_path = checkpoint_path.replace("fcmf_model", "resimg_model")
             resroi_path = checkpoint_path.replace("fcmf_model", "resroi_model")
             
@@ -309,6 +312,7 @@ def main():
         else:
             if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
 
+    # B. LOAD PRETRAINED ENCODER
     elif args.pretrained_iaog_path and os.path.isfile(args.pretrained_iaog_path):
         if master_process: logger.info(f"--> Loading Encoder weights from Pretraining: {args.pretrained_iaog_path}")
         iaog_ckpt = torch.load(args.pretrained_iaog_path, map_location='cpu', weights_only=False)
@@ -347,15 +351,18 @@ def main():
             with tqdm(train_dataloader, position=0, leave=True, disable=not master_process, dynamic_ncols=True) as tepoch:
                 for step, batch in enumerate(tepoch):
                     tepoch.set_description(f"Epoch {train_idx}")
-                    # [CHANGE] Unpack thêm batch_text
+                    
+                    # Unpack batch (text is last element, use _ to ignore)
                     batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                     (t_img_features, roi_img_features, roi_coors, 
                     all_input_ids, all_token_types_ids, all_attn_mask, 
-                    all_added_input_mask, all_label_id, batch_texts) = batch
+                    all_added_input_mask, all_label_id, _) = batch
 
+                    # [CRITICAL] Fix DoubleTensor error by casting to float
                     roi_img_features = roi_img_features.float()
 
                     with torch.amp.autocast('cuda', enabled=args.fp16):
+                        # Feature Extraction
                         encoded_img = []
                         for img_idx in range(args.num_imgs):
                             img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
@@ -369,6 +376,7 @@ def main():
                         vis_embeds = torch.stack(encoded_img, dim=1)
                         roi_embeds = torch.stack(encoded_roi, dim=1)
 
+                        # Loop Aspects
                         all_asp_loss = 0
                         for id_asp in range(len(ASPECT)):
                             logits = model(
@@ -410,17 +418,11 @@ def main():
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                         t_img_features, roi_img_features, roi_coors, \
                         all_input_ids, all_token_types_ids, all_attn_mask, \
-                        all_added_input_mask, all_label_id, _ = batch # _ for text
-                        
-                        t_img_features = t_img_features.to(device)
-                        roi_img_features = roi_img_features.float().to(device)
-                        roi_coors = roi_coors.to(device)
-                        all_input_ids = all_input_ids.to(device)
-                        all_token_types_ids = all_token_types_ids.to(device)
-                        all_attn_mask = all_attn_mask.to(device)
-                        all_added_input_mask = all_added_input_mask.to(device)
-                        all_label_id = all_label_id.to(device)
-                        # Feature Extraction
+                        all_added_input_mask, all_label_id, _ = batch
+
+                        # [CRITICAL] Fix DoubleTensor error in Eval
+                        roi_img_features = roi_img_features.float()
+
                         encoded_img = []
                         for img_idx in range(args.num_imgs):
                             img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
@@ -471,7 +473,7 @@ def main():
                 save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, train_idx)
 
     # ==========================================================================================
-    # 7. TEST EVALUATION (With Formatted Logging)
+    # 7. TEST EVALUATION (With Detailed Logging)
     # ==========================================================================================
     if args.do_eval and master_process:
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
@@ -490,7 +492,7 @@ def main():
             else:
                 model.load_state_dict(checkpoint['model_state_dict'])
             
-            # Load ResNet Checkpoints as well (optional but recommended for consistency)
+            # Load ResNets
             rimg_path = best_path.replace("fcmf", "resimg")
             if os.path.exists(rimg_path):
                 rimg_ckpt = torch.load(rimg_path, map_location=device)
@@ -509,20 +511,21 @@ def main():
 
         true_label_list = {asp:[] for asp in ASPECT}
         pred_label_list = {asp:[] for asp in ASPECT}
-        idx2asp = {i:v for i,v in enumerate(ASPECT)}
         
-        # [NEW] List to store detailed results
+        # [NEW] List to store results for formatted log
         formatted_results = []
 
         with torch.no_grad():
             for batch in tqdm(test_dataloader, desc="Evaluating Test"):
-                # Unpack bao gồm text
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
+                # Unpack bao gồm text
                 (t_img_features, roi_img_features, roi_coors, 
                 all_input_ids, all_token_types_ids, all_attn_mask, 
                 all_added_input_mask, all_label_id, batch_texts) = batch
 
-                # ... Feature Extract (same as before) ...
+                # [CRITICAL] Fix DoubleTensor error in Test
+                roi_img_features = roi_img_features.float()
+
                 encoded_img = []
                 for img_idx in range(args.num_imgs):
                     img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
@@ -534,8 +537,8 @@ def main():
                 vis_embeds = torch.stack(encoded_img, dim=1)
                 roi_embeds = torch.stack(encoded_roi, dim=1)
 
-                # Initialize storage for current batch
-                batch_sample_logs = [{"text": t, "aspects": {}} for t in batch_texts]
+                # Initialize logs for current batch
+                batch_logs = [{"text": t, "aspects": {}} for t in batch_texts]
 
                 for id_asp in range(len(ASPECT)):
                     aspect_name = ASPECT[id_asp]
@@ -552,36 +555,36 @@ def main():
                     preds = np.argmax(logits.detach().cpu().numpy(), axis=-1)
                     labels = all_label_id[:,id_asp].cpu().numpy()
                     
-                    # Accumulate for F1 calc
                     true_label_list[aspect_name].append(labels)
                     pred_label_list[aspect_name].append(preds)
                     
-                    # Store detailed log
+                    # Store detailed result
                     for i, (p, l) in enumerate(zip(preds, labels)):
-                        batch_sample_logs[i]["aspects"][aspect_name] = {
+                        batch_logs[i]["aspects"][aspect_name] = {
                             "predict": POLARITY_MAP.get(p, "Unknown"),
                             "label": POLARITY_MAP.get(l, "Unknown")
                         }
                 
-                formatted_results.extend(batch_sample_logs)
+                formatted_results.extend(batch_logs)
 
-        # 1. Calc & Save Metrics
+        # 1. Calculate & Save Metrics
         output_eval_file = os.path.join(args.output_dir, "test_results_fcmf.txt")
         with open(output_eval_file, "w") as writer:
             writer.write("***** Test results *****\n")
             all_f1 = 0
             for id_asp in range(len(ASPECT)):
-                tr = np.concatenate(true_label_list[idx2asp[id_asp]])
-                pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
+                tr = np.concatenate(true_label_list[ASPECT[id_asp]])
+                pr = np.concatenate(pred_label_list[ASPECT[id_asp]])
                 precision, recall, f1 = macro_f1(tr, pr)
                 all_f1 += f1
-                writer.write(f"{idx2asp[id_asp]} - P: {precision:.4f}, R: {recall:.4f}, F1: {f1:.4f}\n")
-                logger.info(f"{idx2asp[id_asp]} - F1: {f1:.4f}")
+                writer.write(f"{ASPECT[id_asp]} - P: {precision:.4f}, R: {recall:.4f}, F1: {f1:.4f}\n")
+                logger.info(f"{ASPECT[id_asp]} - F1: {f1:.4f}")
+            
             avg_f1 = all_f1 / len(ASPECT)
             writer.write(f"Average F1: {avg_f1:.4f}\n")
             logger.info(f"Average F1: {avg_f1:.4f}")
 
-        # 2. Save Formatted Log
+        # 2. Save Formatted Detailed Log
         log_path = f"{args.output_dir}/test_predictions_formatted.txt"
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"TEST DETAILED PREDICTIONS\n")
