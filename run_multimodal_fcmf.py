@@ -57,7 +57,7 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0, scaler=
     torch.save(checkpoint_dict, path)
     
 def load_model(path):
-    check_point = torch.load(path, map_location='cpu')
+    check_point = torch.load(path, map_location='cpu', weights_only=False)
     return check_point
 
 def main():
@@ -294,7 +294,7 @@ def main():
         if os.path.isfile(checkpoint_path):
             if master_process: logger.info(f"--> Resuming from checkpoint: {checkpoint_path}")
             # Load checkpoint
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
             # 1. Load Model Weights (Giữ nguyên)
             if isinstance(model, (DDP, torch.nn.DataParallel)):
