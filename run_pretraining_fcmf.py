@@ -1,7 +1,9 @@
 import torch
+import torch.nn.functional as F
+import math
 from text_preprocess import *
 from iaog_dataset import IAOGDataset 
-from fcmf_framework.fcmf_pretraining import FCMFSeq2Seq 
+from fcmf_framework.fcmf_pretraining import FCMFSeq2Seq, beam_search
 import argparse
 import logging
 import random
@@ -139,7 +141,6 @@ def main():
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    # [CLEANUP] Dùng CrossEntropy mặc định (tự động mean loss)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100) 
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
     
@@ -147,7 +148,7 @@ def main():
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_train_steps*args.warmup_proportion, num_training_steps=num_train_steps)
 
     start_epoch = 0
-    max_rouge1 = 0.0
+    max_rougeL = 0.0 # [CHANGED] Đổi thành max_rougeL
 
     if args.resume_from_checkpoint and os.path.isfile(args.resume_from_checkpoint):
         ckpt = torch.load(args.resume_from_checkpoint, map_location=device)
@@ -155,10 +156,11 @@ def main():
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_epoch = ckpt['epoch'] + 1
-        if 'best_score' in ckpt: max_rouge1 = ckpt['best_score']
-        logger.info(f"Resumed from epoch {start_epoch}, Best ROUGE: {max_rouge1}")
+        if 'best_score' in ckpt: max_rougeL = ckpt['best_score']
+        logger.info(f"Resumed from epoch {start_epoch}, Best ROUGE-L: {max_rougeL}")
 
-    scorer = rouge_scorer.RougeScorer(['rouge1'], use_stemmer=True)
+    # [CHANGED] Thêm 'rouge2' vào scorer
+    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
 
     # --- 5. TRAINING LOOP ---
     if args.do_train:
@@ -174,9 +176,6 @@ def main():
             for step, batch in enumerate(pbar):
                 pbar.set_description(f"Epoch {epoch}")
                 
-                # [FIXED] Sửa lại unpack batch để loại bỏ phần dư thừa
-                # Dataset trả về 12 phần tử, ta lấy 10 phần tử đầu để train
-                # 2 phần tử cuối là valid_len và text (không dùng trong train) -> gán vào _
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                 (t_img_f, roi_img_f, roi_coors, all_labels, all_dec_ids, all_dec_mask, 
                  all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _, _) = batch 
@@ -205,7 +204,6 @@ def main():
                                        visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
                                        token_type_ids=enc_type, attention_mask=enc_mask, added_attention_mask=add_mask, is_train=True)
                         
-                        # Compute Loss
                         loss_asp = criterion(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
                         total_loss += loss_asp
 
@@ -224,14 +222,17 @@ def main():
 
             # --- EVALUATION ---
             if master_process and args.do_eval:
+                logger.info("***** Running evaluation on Dev Set with BEAM SEARCH *****")
                 model.eval(); resnet_img.eval(); resnet_roi.eval()
-                val_loss = 0
+                
+                total_val_loss = 0
                 val_rouge1_scores = []
+                val_rouge2_scores = [] # [ADDED] List chứa điểm Rouge-2
+                val_rougeL_scores = [] # [ADDED] List chứa điểm Rouge-L
                 
                 with torch.no_grad():
-                    for batch in tqdm(dev_loader, desc="Eval", leave=False):
+                    for batch in tqdm(dev_loader, desc="Eval Beam", leave=False):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
-                        # Trong Eval cũng không cần text
                         (t_img_f, roi_img_f, roi_coors, all_labels, all_dec_ids, _, 
                          all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _, _) = batch
                         
@@ -241,42 +242,69 @@ def main():
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
                         for id_asp in range(6):
-                            logits = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp],
+                            # --- A. TÍNH LOSS (Teacher Forcing) ---
+                            logits_tf = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp],
                                            visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
                                            token_type_ids=all_enc_type[:,id_asp], attention_mask=all_enc_mask[:,id_asp], 
                                            added_attention_mask=all_add_mask[:,id_asp], is_train=True)
-                            
-                            val_loss += criterion(logits.reshape(-1, logits.size(-1)), all_labels[:,id_asp].reshape(-1)).item()
+                            loss_item = criterion(logits_tf.reshape(-1, logits_tf.size(-1)), all_labels[:,id_asp].reshape(-1)).item()
+                            total_val_loss += loss_item
 
-                            preds = torch.argmax(logits, dim=-1)
-                            decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+                            # --- B. SINH TEXT BẰNG BEAM SEARCH ---
+                            batch_size = all_enc_ids.shape[0]
+                            decoded_preds = []
                             
+                            for i in range(batch_size):
+                                pred = beam_search(
+                                    model=model,
+                                    tokenizer=tokenizer,
+                                    enc_ids=all_enc_ids[i, id_asp],
+                                    enc_mask=all_enc_mask[i, id_asp],
+                                    enc_type=all_enc_type[i, id_asp],
+                                    add_mask=all_add_mask[i, id_asp],
+                                    vis_embeds=vis_embeds[i],
+                                    roi_embeds=roi_embeds[i],
+                                    roi_coors=roi_coors[i],
+                                    beam_size=3,
+                                    max_len=args.max_len_decoder,
+                                    device=device
+                                )[0]
+                                decoded_preds.append(pred)
+
+                            # --- C. TÍNH ROUGE 1, 2, L ---
                             lbls = all_labels[:,id_asp].cpu().numpy()
                             lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
                             decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
                             
                             for p, g in zip(decoded_preds, decoded_lbls):
-                                s = scorer.score(g, p)
-                                val_rouge1_scores.append(s['rouge1'].fmeasure)
+                                if p.startswith("n ") and len(p) > 2: p = p[2:]
+                                scores = scorer.score(g, p)
+                                val_rouge1_scores.append(scores['rouge1'].fmeasure)
+                                val_rouge2_scores.append(scores['rouge2'].fmeasure) # [ADDED]
+                                val_rougeL_scores.append(scores['rougeL'].fmeasure) # [ADDED]
 
-                avg_val_loss = val_loss / (len(dev_loader) * 6)
+                avg_val_loss = total_val_loss / (len(dev_loader) * 6)
                 avg_val_rouge1 = np.mean(val_rouge1_scores) if val_rouge1_scores else 0.0
-
-                logger.info(f"Epoch {epoch} | Val Loss: {avg_val_loss:.4f} | Val ROUGE-1: {avg_val_rouge1:.4f}")
-
-                if avg_val_rouge1 > max_rouge1:
-                    max_rouge1 = avg_val_rouge1
-                    logger.info(f"New Best ROUGE-1 ({max_rouge1:.4f})! Saving model...")
-                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_rouge1)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rouge1)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rouge1)
+                avg_val_rouge2 = np.mean(val_rouge2_scores) if val_rouge2_scores else 0.0 # [ADDED]
+                avg_val_rougeL = np.mean(val_rougeL_scores) if val_rougeL_scores else 0.0 # [ADDED]
                 
-                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_rouge1)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rouge1)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rouge1)
+                # [CHANGED] Log cả 3 chỉ số
+                logger.info(f"Epoch {epoch} | Loss: {avg_val_loss:.4f} | R-1: {avg_val_rouge1:.4f} | R-2: {avg_val_rouge2:.4f} | R-L: {avg_val_rougeL:.4f}")
+
+                # [CHANGED] Tối ưu hóa dựa trên ROUGE-L
+                if avg_val_rougeL > max_rougeL:
+                    max_rougeL = avg_val_rougeL
+                    logger.info(f"New Best ROUGE-L ({max_rougeL:.4f})! Saving model...")
+                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_rougeL)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rougeL)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rougeL)
+                
+                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_rougeL)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rougeL)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rougeL)
                 print("\n")
 
-    # --- 6. TEST (WITH FORMATTED LOGGING) ---
+    # --- 6. TEST (WITH BEAM SEARCH & FULL ROUGE) ---
     if args.do_eval and master_process:
         try:
             test_data = pd.read_json(f'{args.pretrained_data_dir}/test_with_iaog.json')
@@ -284,7 +312,6 @@ def main():
             test_loader = DataLoader(IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder), batch_size=args.eval_batch_size)
         except: return
 
-        # Load Best
         ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device)
@@ -295,59 +322,75 @@ def main():
         
         all_test_results = []
         all_rouge1 = []
+        all_rouge2 = [] # [ADDED]
         all_rougeL = []
 
         with torch.no_grad():
-            for batch in tqdm(test_loader, desc="Test"):
+            for batch in tqdm(test_loader, desc="Test with Beam Search"):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                 
-                # Extract batch texts for logging later
-                (t_img_f, roi_img_f, roi_coors, all_dec_lbls, all_dec_ids, _, 
+                (t_img_f, roi_img_f, roi_coors, all_dec_lbls, _, _, 
                  all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _, batch_texts) = batch
 
-                # Feature Extract
                 enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                 vis_embeds = torch.stack(enc_imgs, dim=1)
                 enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                 roi_embeds = torch.stack(enc_rois, dim=1)
 
                 batch_results = [{"text": t, "aspects": {}} for t in batch_texts]
+                batch_size = all_enc_ids.shape[0]
 
                 for id_asp in range(6):
                     aspect_name = ASPECT_LIST[id_asp]
-                    
-                    logits = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp],
-                                   visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
-                                   token_type_ids=all_enc_type[:,id_asp], attention_mask=all_enc_mask[:,id_asp], 
-                                   added_attention_mask=all_add_mask[:,id_asp], is_train=True)
-                    
-                    preds = torch.argmax(logits, dim=-1)
-                    decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-                    
+                    decoded_preds = []
+
+                    for i in range(batch_size):
+                        pred_text = beam_search(
+                            model=model,
+                            tokenizer=tokenizer,
+                            enc_ids=all_enc_ids[i, id_asp],
+                            enc_mask=all_enc_mask[i, id_asp],
+                            enc_type=all_enc_type[i, id_asp],
+                            add_mask=all_add_mask[i, id_asp],
+                            vis_embeds=vis_embeds[i],
+                            roi_embeds=roi_embeds[i],
+                            roi_coors=roi_coors[i],
+                            beam_size=3,
+                            max_len=args.max_len_decoder,
+                            device=device
+                        )[0]
+                        decoded_preds.append(pred_text)
+
                     lbls = all_dec_lbls[:,id_asp].cpu().numpy()
                     lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
                     decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
                     
                     for i, (p, g) in enumerate(zip(decoded_preds, decoded_lbls)):
+                        if p.startswith("n ") and len(p) > 2: p = p[2:]
+                        
                         batch_results[i]["aspects"][aspect_name] = {"predict": p, "label": g}
                         
-                        s = scorer.score(g, p)
-                        all_rouge1.append(s['rouge1'].fmeasure)
-                        all_rougeL.append(s['rougeL'].fmeasure)
+                        scores = scorer.score(g, p)
+                        all_rouge1.append(scores['rouge1'].fmeasure)
+                        all_rouge2.append(scores['rouge2'].fmeasure) # [ADDED]
+                        all_rougeL.append(scores['rougeL'].fmeasure)
                 
                 all_test_results.extend(batch_results)
 
-        # Log Metrics & Formatted Text
         avg_r1 = np.mean(all_rouge1)
+        avg_r2 = np.mean(all_rouge2) # [ADDED]
         avg_rL = np.mean(all_rougeL)
+        
         logger.info(f"***** TEST RESULTS *****")
         logger.info(f"Test ROUGE-1: {avg_r1:.4f}")
+        logger.info(f"Test ROUGE-2: {avg_r2:.4f}")
         logger.info(f"Test ROUGE-L: {avg_rL:.4f}")
 
         log_path = f"{args.output_dir}/test_predictions_formatted.txt"
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"TEST METRICS:\n")
             f.write(f"ROUGE-1: {avg_r1:.4f}\n")
+            f.write(f"ROUGE-2: {avg_r2:.4f}\n")
             f.write(f"ROUGE-L: {avg_rL:.4f}\n")
             f.write("="*50 + "\n\n")
             
