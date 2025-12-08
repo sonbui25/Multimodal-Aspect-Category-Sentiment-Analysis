@@ -356,7 +356,7 @@ def main():
                             vis_embeds=vis_embeds[i],
                             roi_embeds=roi_embeds[i],
                             roi_coors=roi_coors[i],
-                            beam_size=3,
+                            beam_size=args.beam_size,
                             max_len=args.max_len_decoder,
                             device=device
                         )[0]
