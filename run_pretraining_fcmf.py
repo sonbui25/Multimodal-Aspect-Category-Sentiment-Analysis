@@ -51,6 +51,7 @@ def main():
     parser.add_argument("--num_rois", default=4, type=int)
     parser.add_argument('--fine_tune_cnn', action='store_true')
     parser.add_argument("--alpha", default=0.8, type=float)
+    parser.add_argument("--beam_size", default=2, type=int)
     
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
@@ -265,7 +266,7 @@ def main():
                                     vis_embeds=vis_embeds[i],
                                     roi_embeds=roi_embeds[i],
                                     roi_coors=roi_coors[i],
-                                    beam_size=3,
+                                    beam_size=args.beam_size,
                                     max_len=args.max_len_decoder,
                                     device=device
                                 )[0]
