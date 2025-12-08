@@ -276,27 +276,35 @@ def main():
     else:
         scaler = None
 
-    num_train_steps = 0
-    if args.do_train:
-        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
-    
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_train_steps*args.warmup_proportion, num_training_steps=num_train_steps)
-
     # ==========================================================================================
     # 5. CHECKPOINT LOADING
     # ==========================================================================================
     start_epoch = 0
     max_f1 = 0.0
 
+    # Tính num_training_steps cho TOÀN BỘ kế hoạch (36 epochs)
+    num_train_steps = 0
+    if args.do_train:
+        num_train_steps = int(len(train_dataset) / args.train_batch_size / 
+                            args.gradient_accumulation_steps * args.num_train_epochs)
+
+    # Tạo scheduler với config MỚI
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=int(num_train_steps * args.warmup_proportion), 
+        num_training_steps=num_train_steps
+    )
+    
    # A. RESUME
     if args.resume_from_checkpoint:
         checkpoint_path = args.resume_from_checkpoint
         if os.path.isfile(checkpoint_path):
-            if master_process: logger.info(f"--> Resuming from checkpoint: {checkpoint_path}")
-            # Load checkpoint
+            if master_process: 
+                logger.info(f"--> Resuming from checkpoint: {checkpoint_path}")
+            
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
-            # 1. Load Model Weights (Giữ nguyên)
+            # 1. Load model
             if isinstance(model, (DDP, torch.nn.DataParallel)):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
             else:
@@ -321,23 +329,38 @@ def main():
                 unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
                 unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
 
-            # 3. Load Optimizer (NÊN LOAD để giữ Momentum)
+             # 3. Load optimizer
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             
-            # [QUAN TRỌNG - SỬA ĐỔI] KHÔNG LOAD SCHEDULER CŨ
-            # scheduler.load_state_dict(checkpoint['scheduler_state_dict']) 
-            if master_process: logger.info("--> SKIP loading scheduler state to reset Learning Rate for fine-tuning.")
-
-            # 4. Load Scaler (Nếu có, để fix lỗi FP16)
+            # 4. ĐIỀU CHỈNH scheduler cho config mới
+            start_epoch = checkpoint['epoch'] + 1
+            
+            # Tính số steps đã hoàn thành
+            steps_already_done = int(len(train_dataset) / args.train_batch_size / 
+                                    args.gradient_accumulation_steps * start_epoch)
+            
+            # Set step_count cho scheduler
+            for _ in range(steps_already_done):
+                scheduler.step()  # Thủ công "chạy" đến đúng step
+            # 5. Load Scaler (Nếu có, để fix lỗi FP16)
             if args.fp16 and 'scaler_state_dict' in checkpoint and 'scaler' in locals():
                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
                 if master_process: logger.info("--> Scaler state loaded.")
-
-            # 5. Set epoch bắt đầu
-            start_epoch = checkpoint['epoch'] + 1
+                
+            # 6. Load best score
             max_f1 = checkpoint.get('best_score', 0.0)
-            
-            if master_process: logger.info(f"--> Resumed successfully. Starting from Epoch {start_epoch}. Previous Best F1: {max_f1}")
+        
+            if master_process:
+                logger.info("="*60)
+                logger.info("SCHEDULER STATUS:")
+                logger.info(f"  Previous Best F1: {max_f1}")
+                logger.info(f"  Total epochs planned: {args.num_train_epochs}")
+                logger.info(f"  Starting from epoch: {start_epoch}")
+                logger.info(f"  Total training steps: {num_train_steps}")
+                logger.info(f"  Steps already done: {scheduler._step_count}")
+                logger.info(f"  Current LR (encoder): {optimizer.param_groups[0]['lr']:.2e}")
+                logger.info(f"  Current LR (head):    {optimizer.param_groups[2]['lr']:.2e}")
+                logger.info("="*60)
         else:
             if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
 
