@@ -427,7 +427,8 @@ class BertPooler(nn.Module): #ok
 class FeatureExtractor(torch.nn.Module): #ok
   def __init__(self, pretrained_path):
     super(FeatureExtractor,self).__init__()
-    self.cell = AutoModel.from_pretrained(pretrained_path)
+    self.cell = AutoModel.from_pretrained(pretrained_path,
+                                          local_files_only=True)
 
   def forward(self, input_ids, token_type_ids, attention_mask):
     seq_out, pooled_out = self.cell(input_ids = input_ids,
