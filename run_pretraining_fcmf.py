@@ -227,8 +227,8 @@ def main():
                 model.eval(); resnet_img.eval(); resnet_roi.eval()
                 
                 total_val_loss = 0
-                val_rouge1_scores = []
-                val_rouge2_scores = [] # [ADDED] List chứa điểm Rouge-2
+                # val_rouge1_scores = []
+                # val_rouge2_scores = [] # [ADDED] List chứa điểm Rouge-2
                 val_rougeL_scores = [] # [ADDED] List chứa điểm Rouge-L
                 
                 with torch.no_grad():
@@ -243,13 +243,13 @@ def main():
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
                         for id_asp in range(6):
-                            # --- A. TÍNH LOSS (Teacher Forcing) ---
-                            logits_tf = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp],
-                                           visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
-                                           token_type_ids=all_enc_type[:,id_asp], attention_mask=all_enc_mask[:,id_asp], 
-                                           added_attention_mask=all_add_mask[:,id_asp], is_train=True)
-                            loss_item = criterion(logits_tf.reshape(-1, logits_tf.size(-1)), all_labels[:,id_asp].reshape(-1)).item()
-                            total_val_loss += loss_item
+                            # # --- A. TÍNH LOSS (Teacher Forcing) ---
+                            # logits_tf = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp],
+                            #                visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
+                            #                token_type_ids=all_enc_type[:,id_asp], attention_mask=all_enc_mask[:,id_asp], 
+                            #                added_attention_mask=all_add_mask[:,id_asp], is_train=True)
+                            # loss_item = criterion(logits_tf.reshape(-1, logits_tf.size(-1)), all_labels[:,id_asp].reshape(-1)).item()
+                            # total_val_loss += loss_item
 
                             # --- B. SINH TEXT BẰNG BEAM SEARCH ---
                             batch_size = all_enc_ids.shape[0]
@@ -272,7 +272,7 @@ def main():
                                 )[0]
                                 decoded_preds.append(pred)
 
-                            # --- C. TÍNH ROUGE 1, 2, L ---
+                            # --- C. TÍNH ROUGE L ---
                             lbls = all_labels[:,id_asp].cpu().numpy()
                             lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
                             decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
@@ -280,17 +280,17 @@ def main():
                             for p, g in zip(decoded_preds, decoded_lbls):
                                 if p.startswith("n ") and len(p) > 2: p = p[2:]
                                 scores = scorer.score(g, p)
-                                val_rouge1_scores.append(scores['rouge1'].fmeasure)
-                                val_rouge2_scores.append(scores['rouge2'].fmeasure) # [ADDED]
+                                # val_rouge1_scores.append(scores['rouge1'].fmeasure)
+                                # val_rouge2_scores.append(scores['rouge2'].fmeasure) # [ADDED]
                                 val_rougeL_scores.append(scores['rougeL'].fmeasure) # [ADDED]
 
-                avg_val_loss = total_val_loss / (len(dev_loader) * 6)
-                avg_val_rouge1 = np.mean(val_rouge1_scores) if val_rouge1_scores else 0.0
-                avg_val_rouge2 = np.mean(val_rouge2_scores) if val_rouge2_scores else 0.0 # [ADDED]
+                # avg_val_loss = total_val_loss / (len(dev_loader) * 6)
+                # avg_val_rouge1 = np.mean(val_rouge1_scores) if val_rouge1_scores else 0.0
+                # avg_val_rouge2 = np.mean(val_rouge2_scores) if val_rouge2_scores else 0.0 # [ADDED]
                 avg_val_rougeL = np.mean(val_rougeL_scores) if val_rougeL_scores else 0.0 # [ADDED]
                 
                 # [CHANGED] Log cả 3 chỉ số
-                logger.info(f"Epoch {epoch} | Loss: {avg_val_loss:.4f} | R-1: {avg_val_rouge1:.4f} | R-2: {avg_val_rouge2:.4f} | R-L: {avg_val_rougeL:.4f}")
+                logger.info(f"Epoch {epoch} | R-L: {avg_val_rougeL:.4f}")
 
                 # [CHANGED] Tối ưu hóa dựa trên ROUGE-L
                 if avg_val_rougeL > max_rougeL:
@@ -322,8 +322,8 @@ def main():
         model.eval(); resnet_img.eval(); resnet_roi.eval()
         
         all_test_results = []
-        all_rouge1 = []
-        all_rouge2 = [] # [ADDED]
+        # all_rouge1 = []
+        # all_rouge2 = [] # [ADDED]
         all_rougeL = []
 
         with torch.no_grad():
@@ -372,26 +372,26 @@ def main():
                         batch_results[i]["aspects"][aspect_name] = {"predict": p, "label": g}
                         
                         scores = scorer.score(g, p)
-                        all_rouge1.append(scores['rouge1'].fmeasure)
-                        all_rouge2.append(scores['rouge2'].fmeasure) # [ADDED]
+                        # all_rouge1.append(scores['rouge1'].fmeasure)
+                        # all_rouge2.append(scores['rouge2'].fmeasure) # [ADDED]
                         all_rougeL.append(scores['rougeL'].fmeasure)
                 
                 all_test_results.extend(batch_results)
 
-        avg_r1 = np.mean(all_rouge1)
-        avg_r2 = np.mean(all_rouge2) # [ADDED]
+        # avg_r1 = np.mean(all_rouge1)
+        # avg_r2 = np.mean(all_rouge2) # [ADDED]
         avg_rL = np.mean(all_rougeL)
         
         logger.info(f"***** TEST RESULTS *****")
-        logger.info(f"Test ROUGE-1: {avg_r1:.4f}")
-        logger.info(f"Test ROUGE-2: {avg_r2:.4f}")
+        # logger.info(f"Test ROUGE-1: {avg_r1:.4f}")
+        # logger.info(f"Test ROUGE-2: {avg_r2:.4f}")
         logger.info(f"Test ROUGE-L: {avg_rL:.4f}")
 
         log_path = f"{args.output_dir}/test_predictions_formatted.txt"
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"TEST METRICS:\n")
-            f.write(f"ROUGE-1: {avg_r1:.4f}\n")
-            f.write(f"ROUGE-2: {avg_r2:.4f}\n")
+            # f.write(f"ROUGE-1: {avg_r1:.4f}\n")
+            # f.write(f"ROUGE-2: {avg_r2:.4f}\n")
             f.write(f"ROUGE-L: {avg_rL:.4f}\n")
             f.write("="*50 + "\n\n")
             
