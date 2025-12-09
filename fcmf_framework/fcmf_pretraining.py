@@ -18,23 +18,11 @@ def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask,
                 vis_embeds, roi_embeds, roi_coors, 
                 beam_size=3, num_preds=1, max_len=20, device='cuda'):
     """
-    Thực hiện Beam Search cho mô hình FCMFSeq2Seq.
-    
-    Args:
-        model: Mô hình FCMFSeq2Seq đã train.
-        tokenizer: Tokenizer để lấy ID đặc biệt.
-        enc_ids, ...: Các input cho Encoder (đã batch hóa hoặc 1 sample).
-        beam_size (int): Kích thước chùm (k).
-        num_preds (int): Số lượng câu dự đoán trả về (thường là 1 câu tốt nhất).
-        max_len (int): Độ dài tối đa của câu sinh ra.
-    
-    Returns:
-        decoded_preds (list): List các chuỗi văn bản đã decode.
+    Thực hiện Beam Search tối ưu cho FCMFSeq2Seq.
     """
     model.eval()
     
-    # 1. Chuẩn bị dữ liệu (Giả định đầu vào là Batch=1 để dễ hiểu và đúng chuẩn d2l)
-    # Nếu đầu vào là batch lớn, vòng lặp eval bên ngoài sẽ gọi hàm này từng cái một.
+    # 1. Chuẩn bị Batch Dimension (nếu input là 1 sample)
     if enc_ids.dim() == 1:
         enc_ids = enc_ids.unsqueeze(0)
         enc_mask = enc_mask.unsqueeze(0)
@@ -44,85 +32,120 @@ def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask,
         roi_embeds = roi_embeds.unsqueeze(0)
         roi_coors = roi_coors.unsqueeze(0)
 
-    # 2. Chạy Encoder một lần duy nhất (Encoder output được dùng lại)
-    # Lưu ý: Model FCMF có thể forward cả encoder lẫn decoder cùng lúc.
-    # Nhưng để tối ưu, ta nên tách ra nếu model hỗ trợ. 
-    # Ở đây ta giả lập việc gọi model.encoder (nếu có) hoặc chạy forward đầy đủ.
-    # Để an toàn với code hiện tại (chạy full forward), ta sẽ truyền input lặp lại.
-
+    # 2. CHẠY ENCODER MỘT LẦN DUY NHẤT (Encoder Caching)
+    # Thay vì gọi model() lặp lại, ta chỉ encoding 1 lần.
+    with torch.no_grad():
+        enc_outputs = model.encoder(
+            enc_ids, 
+            vis_embeds, 
+            roi_embeds, 
+            roi_coors, 
+            enc_type, 
+            enc_mask, 
+            add_mask
+        )
+    
     # 3. Khởi tạo Beam
-    # Beam chứa: (score, sequence_tensor)
-    # Score ban đầu là 0.0, sequence là [CLS]
-    start_token = tokenizer.cls_token_id
-    initial_seq = torch.tensor([[start_token]], device=device, dtype=torch.long)
+    # [QUAN TRỌNG]: Dùng đúng token bắt đầu là <iaog> thay vì cls_token
+    # Kiểm tra xem token <iaog> có trong tokenizer không, nếu không fallback về bos/cls
+    if '<iaog>' in tokenizer.get_vocab():
+        start_token_id = tokenizer.convert_tokens_to_ids('<iaog>')
+    else:
+        # Fallback nếu chưa add token (nhưng theo code bạn là có add)
+        start_token_id = tokenizer.cls_token_id 
+
+    # Tạo decoder input ban đầu
+    decoder_input = torch.tensor([[start_token_id]], device=device, dtype=torch.long)
     
-    # Danh sách k ứng viên hiện tại (Score, Sequence)
-    # Lưu ý: Score ở đây là Log-Likelihood
-    beams = [(0.0, initial_seq)]
+    # Khởi tạo state cho decoder (KV cache)
+    # Lưu ý: Hàm init_state cần enc_outputs và valid_lens (ở đây valid_lens=None khi eval)
+    state = model.decoder.init_state(enc_outputs, None)
+
+    # Beam chứa: (score, sequence, state)
+    # Score là log-likelihood (bắt đầu bằng 0)
+    beams = [(0.0, decoder_input, state)]
     
-    # Danh sách các câu đã hoàn thành (gặp token [SEP])
     final_candidates = []
 
     for step in range(max_len):
         candidates = []
         
-        # Duyệt qua từng ứng viên trong beam hiện tại
-        for score, seq in beams:
-            # Nếu câu đã kết thúc ở bước trước (nhưng chưa bị loại), ta add vào final luôn
+        # Duyệt qua các beam hiện tại
+        for score, seq, current_state in beams:
+            # Kiểm tra nếu đã kết thúc (gặp SEP)
             if seq[0, -1].item() == tokenizer.sep_token_id:
                 final_candidates.append((score, seq))
                 continue
-                
-            # Chuẩn bị input mở rộng (Expand inputs to match beam items if needed)
-            # Ở đây ta chạy model forward cho 1 sequence này
+            
+            # CHỈ ĐƯA VÀO TOKEN CUỐI CÙNG để tận dụng KV Cache (incremental decoding)
+            # Nếu model.decoder hỗ trợ state update đúng cách.
+            # Tuy nhiên, code IAOGDecoder của bạn ghép chuỗi trong state: 
+            # key_values = torch.cat((state[2][self.i], X), dim=1)
+            # Nên ta chỉ cần đưa token mới nhất vào (dec_input_step).
+            
+            dec_input_step = seq[:, -1:] # Lấy token cuối cùng [1, 1]
+
             with torch.no_grad():
-                # Forward Model
-                # Lưu ý: Model trả về Logits [Batch, Seq_Len, Vocab]
-                logits = model(enc_X=enc_ids, dec_X=seq,
-                               visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
-                               token_type_ids=enc_type, attention_mask=enc_mask, 
-                               added_attention_mask=add_mask, is_train=False)
+                # Gọi trực tiếp Decoder
+                # Lưu ý: Cần deepcopy state nếu state là list mutable để tránh ảnh hưởng các beam khác
+                # Nhưng PyTorch tensor trong list thì cần cẩn thận.
+                # Để đơn giản và an toàn bộ nhớ, ta clone state cho mỗi candidate.
                 
-                # Lấy logit của từ cuối cùng
+                # Copy state cho nhánh beam này (vì mỗi beam có lịch sử KV cache riêng)
+                # State structure: [enc_outputs, enc_valid_lens, [layer_kv_cache...]]
+                # Layer cache là List các Tensor.
+                state_copy = [
+                    current_state[0], # enc_outputs (share chung, ko cần copy deep)
+                    current_state[1], # valid_lens
+                    [layer_cache.clone() if layer_cache is not None else None for layer_cache in current_state[2]]
+                ]
+                
+                # Forward Decoder
+                # dec_input_step là token vừa sinh ra
+                logits = model.decoder(dec_input_step, state_copy, is_train=False)
+                # Logits shape: [Batch, 1, Vocab] -> lấy token cuối
                 next_token_logits = logits[0, -1, :]
                 
-                # Tính Log-Softmax để có Log-Probabilities chuẩn
                 log_probs = F.log_softmax(next_token_logits, dim=-1)
                 
-                # Lấy Top-K từ vựng có xác suất cao nhất cho nhánh này
-                # (Lấy beam_size ứng viên)
+                # Lấy Top-K
                 top_k_scores, top_k_ids = torch.topk(log_probs, beam_size)
                 
                 for k in range(beam_size):
-                    # Cộng dồn điểm số: Score mới = Score cũ + LogProb mới
                     new_score = score + top_k_scores[k].item()
-                    
-                    # Ghép từ mới vào chuỗi
                     new_token = top_k_ids[k].view(1, 1)
                     new_seq = torch.cat([seq, new_token], dim=1)
                     
-                    candidates.append((new_score, new_seq))
+                    # Lưu candidate gồm: score, chuỗi mới, và state mới (đã update sau forward)
+                    candidates.append((new_score, new_seq, state_copy))
         
-        # --- Pruning (Tỉa nhánh) ---
-        # 1. Sắp xếp tất cả ứng viên theo điểm số giảm dần (tốt nhất lên đầu)
-        ordered = sorted(candidates, key=lambda x: x[0], reverse=True)
-        
-        # 2. Chọn ra k ứng viên tốt nhất để làm beam cho vòng sau
-        beams = ordered[:beam_size]
-        
-        # Tối ưu: Nếu tất cả top-k beams đều đã kết thúc, dừng sớm
-        if all(seq[0, -1].item() == tokenizer.sep_token_id for _, seq in beams):
+        # Pruning: Chọn top beam_size ứng viên tốt nhất
+        if not candidates:
             break
             
-    # Thêm các beam còn lại vào danh sách ứng viên cuối cùng (nếu chưa kết thúc)
-    final_candidates.extend(beams)
+        # Sắp xếp giảm dần theo score
+        ordered = sorted(candidates, key=lambda x: x[0], reverse=True)
+        
+        # Vì state_copy trong loop trên có thể bị reference chéo nếu implement không kỹ
+        # ở đây mỗi candidate đã giữ state_copy riêng sau khi forward, nên an toàn.
+        beams = ordered[:beam_size]
+        
+        # Early stopping nếu tất cả beams đều đã xong
+        if all(seq[0, -1].item() == tokenizer.sep_token_id for _, seq, _ in beams):
+            final_candidates.extend([(s, seq) for s, seq, _ in beams])
+            break
     
-    # Sắp xếp lại lần cuối và chọn câu tốt nhất
-    # (Có thể áp dụng length penalty ở đây: score / len(seq)**alpha)
+    # Nếu chưa có candidate nào hoàn thành (vẫn đang chạy đến max_len)
+    if len(final_candidates) == 0:
+         final_candidates = [(s, seq) for s, seq, _ in beams]
+
+    # Chọn câu tốt nhất
     best_score, best_seq = sorted(final_candidates, key=lambda x: x[0], reverse=True)[0]
     
-    # Decode ra text
     pred_text = tokenizer.decode(best_seq[0], skip_special_tokens=True)
+    
+    # Clean text (nếu có lỗi tokenizer sinh ra khoảng trắng thừa)
+    pred_text = pred_text.replace("<iaog>", "").strip()
     
     return [pred_text]
 class FCMFEncoder(nn.Module):
