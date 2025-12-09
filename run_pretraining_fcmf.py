@@ -142,7 +142,23 @@ def main():
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100) 
+    # 1. Tạo trọng số cho các lớp
+    # Mặc định là 1.0 cho tất cả
+    loss_weights = torch.ones(len(tokenizer)).to(device)
+
+    # 2. Tìm ID của các token liên quan đến "none"
+    # Lưu ý: Tokenizer có thể tách "none" thành ["no", "ne"] hoặc ["none"], cần kiểm tra kỹ
+    # Ví dụ đơn giản nếu "none" là 1 token:
+    none_id = tokenizer.convert_tokens_to_ids("none") # Hoặc ID của token label 0 nếu bạn dùng classification
+    # Nếu dùng generation (seq2seq), bạn cần giảm trọng số cho token chữ "none"
+    if none_id != tokenizer.unk_token_id:
+        loss_weights[none_id] = 0.1  # Giảm sự quan tâm đến lớp None xuống 10 lần
+
+    # 3. Cập nhật Criterion
+    criterion = torch.nn.CrossEntropyLoss(
+        weight=loss_weights, 
+        ignore_index=-100
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
     
     num_train_steps = len(train_dataset) // args.train_batch_size * args.num_train_epochs if args.do_train else 0
