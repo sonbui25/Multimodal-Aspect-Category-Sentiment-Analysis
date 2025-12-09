@@ -51,7 +51,7 @@ def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask,
     if '<iaog>' in tokenizer.get_vocab():
         start_token_id = tokenizer.convert_tokens_to_ids('<iaog>')
     else:
-        # Fallback nếu chưa add token (nhưng theo code bạn là có add)
+        # Fallback nếu chưa add token (nhưng theo code  là có add)
         start_token_id = tokenizer.cls_token_id 
 
     # Tạo decoder input ban đầu
@@ -79,7 +79,7 @@ def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask,
             
             # CHỈ ĐƯA VÀO TOKEN CUỐI CÙNG để tận dụng KV Cache (incremental decoding)
             # Nếu model.decoder hỗ trợ state update đúng cách.
-            # Tuy nhiên, code IAOGDecoder của bạn ghép chuỗi trong state: 
+            # Tuy nhiên, code IAOGDecoder của  ghép chuỗi trong state: 
             # key_values = torch.cat((state[2][self.i], X), dim=1)
             # Nên ta chỉ cần đưa token mới nhất vào (dec_input_step).
             

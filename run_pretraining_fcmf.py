@@ -315,7 +315,7 @@ def main():
 
         ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
         if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location=device)
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
             else: model.load_state_dict(ckpt['model_state_dict'])
         
