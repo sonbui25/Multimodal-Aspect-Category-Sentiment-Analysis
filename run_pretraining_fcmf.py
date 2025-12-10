@@ -160,8 +160,8 @@ def main():
         if 'best_score' in ckpt: max_rougeL = ckpt['best_score']
         logger.info(f"Resumed from epoch {start_epoch}, Best ROUGE-L: {max_rougeL}")
 
-    # [CHANGED] Thêm 'rouge2' vào scorer
-    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+    # Rouge Scorer
+    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
     # --- 5. TRAINING LOOP ---
     if args.do_train:
@@ -191,13 +191,17 @@ def main():
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
                     # --- LOOP QUA 6 ASPECT ---
+                    # ==============================================================================
+                    # [FIXED STRATEGY] SAMPLE-WISE WEIGHTING
+                    # Sentiment Samples: Weight = 1.0 (Học mạnh)
+                    # None Samples:      Weight = 0.1 (Học nhẹ để tránh spam, giữ negative constraint)
+                    # ==============================================================================
+                    
+                    # Định nghĩa trọng số cho mẫu None (Tune số này: 0.1, 0.15, 0.2)
+                    NONE_SAMPLE_WEIGHT = 0.1
+                    
                     total_loss = 0
-
-                    # 1. Tìm ID của token "none" (Làm ở ngoài vòng lặp epoch cho nhanh)
-                    # Lưu ý: Tokenizer có thể tách "none" thành ["n", "one"] hoặc giữ nguyên "none"
-                    # Bạn cần kiểm tra kỹ. Giả sử token id của 'none' là biến none_token_id.
-                    # Cách đơn giản nhất để check là decode nhãn ra text ngay trong vòng lặp.
-
+                    
                     for id_asp in range(6):
                         enc_ids = all_enc_ids[:, id_asp, :]
                         enc_type = all_enc_type[:, id_asp, :]
@@ -205,62 +209,51 @@ def main():
                         add_mask = all_add_mask[:, id_asp, :]
                         
                         dec_ids = all_dec_ids[:, id_asp, :]
-                        labels = all_labels[:, id_asp, :] # Shape [Batch, Seq_Len]
+                        labels = all_labels[:, id_asp, :]
 
-                        # =================================================================
-                        # [MỚI] BƯỚC LỌC 'NONE': CHỈ HỌC CÁC MẪU CÓ SENTIMENT
-                        # =================================================================
+                        # 1. Xác định mẫu nào là 'none', mẫu nào là 'sentiment'
+                        # Decode label ra text để kiểm tra chính xác tuyệt đối
+                        # (Lưu ý: labels đang là tensor trên GPU, cần chuyển về cpu numpy để decode)
+                        lbl_ids = labels.detach().cpu().numpy()
+                        lbl_ids = np.where(lbl_ids != -100, lbl_ids, tokenizer.pad_token_id)
+                        decoded_texts = tokenizer.batch_decode(lbl_ids, skip_special_tokens=True)
                         
-                        # Cách 1: Dựa vào Ground Truth Text (Chậm hơn chút nhưng chính xác)
-                        # Decode nhãn ra text để xem có phải là "none" không
-                        decoded_batch_labels = tokenizer.batch_decode(
-                            np.where(labels.cpu().numpy() != -100, labels.cpu().numpy(), tokenizer.pad_token_id), 
-                            skip_special_tokens=True
-                        )
+                        # Tạo mask trọng số: 1.0 cho sentiment, 0.1 cho none
+                        batch_sample_weights = []
+                        for txt in decoded_texts:
+                            clean_txt = txt.lower().strip()
+                            if "none" in clean_txt or clean_txt == "":
+                                batch_sample_weights.append(NONE_SAMPLE_WEIGHT)
+                            else:
+                                batch_sample_weights.append(1.0)
                         
-                        # Tạo mask: 1 nếu KHÔNG PHẢI none (cần học), 0 nếu là none (bỏ qua)
-                        # Lưu ý: strip() để xóa khoảng trắng thừa
-                        valid_sample_mask = torch.tensor(
-                            [0.1 if "none" in lbl.lower().strip() else 1 for lbl in decoded_batch_labels]
-                        ).to(device)
-                        
-                        # Nếu cả batch toàn là none thì bỏ qua luôn aspect này để tiết kiệm tính toán
-                        if torch.sum(valid_sample_mask) == 0:
-                            continue 
+                        # Chuyển thành tensor đưa lên GPU
+                        sample_weights = torch.tensor(batch_sample_weights, device=device) # Shape: [Batch]
 
-                        # =================================================================
-
-                        # Forward model bình thường
-                        logits = model(
-                            enc_X=enc_ids, dec_X=dec_ids, 
-                            visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
-                            token_type_ids=enc_type, attention_mask=enc_mask, added_attention_mask=add_mask, is_train=True
-                        )
+                        # 2. Forward Model
+                        logits = model(enc_X=enc_ids, dec_X=dec_ids, 
+                                    visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
+                                    token_type_ids=enc_type, attention_mask=enc_mask, added_attention_mask=add_mask, is_train=True)
                         
-                        # Tính Loss cho từng mẫu trong Batch (reduction='none' để giữ loss riêng từng dòng)
-                        # Shape loss_per_sample: [Batch]
+                        # 3. Tính Loss riêng cho từng mẫu (reduction='none')
                         loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
                         
-                        # Flatten để tính loss, sau đó reshape lại về [Batch, Seq_Len] rồi sum theo Seq_Len
-                        # Tuy nhiên, output của CrossEntropyLoss với input (N, C, d1...) là (N, d1...)
-                        # Logits: [Batch, Seq, Vocab] -> Permute để [Batch, Vocab, Seq] cho hợp hàm Loss
-                        loss_per_token = loss_fct(logits.permute(0, 2, 1), labels) # Shape [Batch, Seq]
-                        loss_per_sample = loss_per_token.sum(dim=1) # Shape [Batch] -> Tổng loss của câu
+                        # Logits: [Batch, Seq, Vocab] -> Permute: [Batch, Vocab, Seq]
+                        loss_per_token = loss_fct(logits.permute(0, 2, 1), labels) # -> [Batch, Seq]
+                        loss_per_sample = loss_per_token.sum(dim=1) # -> [Batch] (Tổng loss của câu)
                         
-                        # ÁP DỤNG MASK: Nhân loss với mask (0 hoặc 1)
-                        # Những mẫu là 'none' sẽ có loss = 0
-                        masked_loss = loss_per_sample * valid_sample_mask
+                        # 4. Áp dụng trọng số
+                        weighted_loss = loss_per_sample * sample_weights
                         
-                        # Tính trung bình loss trên SỐ LƯỢNG MẪU KHÁC NONE (để tránh loss bị nhỏ đi do chia cho cả batch)
-                        num_valid = torch.sum(valid_sample_mask)
-                        if num_valid > 0:
-                            loss_asp = torch.sum(masked_loss) / num_valid
-                        else:
-                            loss_asp = torch.tensor(0.0).to(device)
-
+                        # 5. Tính trung bình (Chia cho tổng trọng số để loss không bị nhỏ đi một cách giả tạo)
+                        # Hoặc đơn giản là mean() nếu bạn muốn loss phản ánh đúng tỷ lệ đóng góp
+                        loss_asp = weighted_loss.mean() 
+                        
                         total_loss += loss_asp
 
-                    if args.gradient_accumulation_steps > 1: total_loss /= args.gradient_accumulation_steps
+                # Scale và Backward như cũ...
+                if args.gradient_accumulation_steps > 1:
+                    total_loss = total_loss / args.gradient_accumulation_steps
 
                 if args.fp16: scaler.scale(total_loss).backward()
                 else: total_loss.backward()
