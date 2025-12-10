@@ -33,7 +33,11 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score):
         "scheduler_state_dict": scheduler.state_dict(),
         "best_score": best_score, 
     }, path)
-
+def calculate_f1(TP, FP, FN):
+    precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+    recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return precision, recall, f1
 def main():
     parser = argparse.ArgumentParser()
     # --- ARGUMENTS ---
@@ -149,7 +153,7 @@ def main():
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_train_steps*args.warmup_proportion, num_training_steps=num_train_steps)
 
     start_epoch = 0
-    max_rougeL = 0.0 # [CHANGED] Đổi thành max_rougeL
+    max_f1_score = 0.0 # [CHANGED] Đổi thành max_f1_score
 
     if args.resume_from_checkpoint and os.path.isfile(args.resume_from_checkpoint):
         ckpt = torch.load(args.resume_from_checkpoint, map_location=device)
@@ -274,8 +278,10 @@ def main():
                 total_val_loss = 0
                 # val_rouge1_scores = []
                 # val_rouge2_scores = [] # [ADDED] List chứa điểm Rouge-2
-                val_rougeL_scores = [] # [ADDED] List chứa điểm Rouge-L
-                
+                # val_rougeL_scores = [] # [ADDED] List chứa điểm Rouge-L
+                total_TP = 0
+                total_FP = 0
+                total_FN = 0
                 with torch.no_grad():
                     for batch in tqdm(dev_loader, desc="Eval Beam", leave=False):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
@@ -321,33 +327,51 @@ def main():
                             lbls = all_labels[:,id_asp].cpu().numpy()
                             lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
                             decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
+                            def parse_sentiment_string(text):
+                                if not text or text.lower().strip() == 'none':
+                                    return set()
+                                return set(s.strip() for s in text.lower().split(','))
                             
-                            for p, g in zip(decoded_preds, decoded_lbls):
-                                if p.startswith("n ") and len(p) > 2: p = p[2:]
-                                scores = scorer.score(g, p)
+                            for p_text, g_text in zip(decoded_preds, decoded_lbls):
+                                # [ADDED] Tiền xử lý predict: Nếu có "n " ở đầu (từ Beam Search), xóa đi
+                                if p_text.startswith("n ") and len(p_text) > 2: p_text = p_text[2:]
+                                
+                                # [ADDED] Phân tích chuỗi thành tập hợp các từ cảm xúc
+                                pred_set = parse_sentiment_string(p_text)
+                                gold_set = parse_sentiment_string(g_text)
+                                
+                                # [ADDED] Tính TP, FP, FN cho MẪU NÀY
+                                TP = len(pred_set.intersection(gold_set))
+                                FP = len(pred_set.difference(gold_set))
+                                FN = len(gold_set.difference(pred_set))
+                                
+                                # [ADDED] Cập nhật tổng
+                                total_TP += TP
+                                total_FP += FP
+                                total_FN += FN
                                 # val_rouge1_scores.append(scores['rouge1'].fmeasure)
                                 # val_rouge2_scores.append(scores['rouge2'].fmeasure) # [ADDED]
-                                val_rougeL_scores.append(scores['rougeL'].fmeasure) # [ADDED]
+                                # val_rougeL_scores.append(scores['rougeL'].fmeasure) # [ADDED]
 
                 # avg_val_loss = total_val_loss / (len(dev_loader) * 6)
                 # avg_val_rouge1 = np.mean(val_rouge1_scores) if val_rouge1_scores else 0.0
                 # avg_val_rouge2 = np.mean(val_rouge2_scores) if val_rouge2_scores else 0.0 # [ADDED]
-                avg_val_rougeL = np.mean(val_rougeL_scores) if val_rougeL_scores else 0.0 # [ADDED]
-                
+                # avg_val_rougeL = np.mean(val_rougeL_scores) if val_rougeL_scores else 0.0 # [ADDED]
+                avg_val_P, avg_val_R, avg_val_F1 = calculate_f1(total_TP, total_FP, total_FN)
                 # [CHANGED] Log cả 3 chỉ số
-                logger.info(f"Epoch {epoch} | R-L: {avg_val_rougeL:.4f}")
+                logger.info(f"Epoch {epoch} | P: {avg_val_P:.4f} | R: {avg_val_R:.4f} | F1: {avg_val_F1:.4f}")
 
                 # [CHANGED] Tối ưu hóa dựa trên ROUGE-L
-                if avg_val_rougeL > max_rougeL:
-                    max_rougeL = avg_val_rougeL
-                    logger.info(f"New Best ROUGE-L ({max_rougeL:.4f})! Saving model...")
-                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_rougeL)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rougeL)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rougeL)
-                
-                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_rougeL)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rougeL)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rougeL)
+                if avg_val_F1 > max_f1_score:
+                    max_f1_score = avg_val_F1
+                    logger.info(f"New Best F1-Score ({max_f1_score:.4f})! Saving model...")
+                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score)
+                    
+                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score)
                 print("\n")
 
     # --- 6. TEST (WITH BEAM SEARCH & FULL ROUGE) ---
@@ -369,8 +393,10 @@ def main():
         all_test_results = []
         # all_rouge1 = []
         # all_rouge2 = [] # [ADDED]
-        all_rougeL = []
-
+        # all_rougeL = []
+        test_TP = 0
+        test_FP = 0
+        test_FN = 0
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Test with Beam Search"):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
@@ -414,30 +440,48 @@ def main():
                     for i, (p, g) in enumerate(zip(decoded_preds, decoded_lbls)):
                         if p.startswith("n ") and len(p) > 2: p = p[2:]
                         
-                        batch_results[i]["aspects"][aspect_name] = {"predict": p, "label": g}
+                        # [ADDED] Phân tích chuỗi thành tập hợp các từ cảm xúc
+                        pred_set = parse_sentiment_string(p)
+                        gold_set = parse_sentiment_string(g)
                         
-                        scores = scorer.score(g, p)
+                        # [ADDED] Tính TP, FP, FN cho MẪU NÀY
+                        TP = len(pred_set.intersection(gold_set))
+                        FP = len(pred_set.difference(gold_set))
+                        FN = len(gold_set.difference(pred_set))
+                        
+                        # [ADDED] Cập nhật tổng
+                        test_TP += TP
+                        test_FP += FP
+                        test_FN += FN
+                        
+                        batch_results[i]["aspects"][aspect_name] = {"predict": p, "label": g}
                         # all_rouge1.append(scores['rouge1'].fmeasure)
                         # all_rouge2.append(scores['rouge2'].fmeasure) # [ADDED]
-                        all_rougeL.append(scores['rougeL'].fmeasure)
+                        # all_rougeL.append(scores['rougeL'].fmeasure)
                 
                 all_test_results.extend(batch_results)
 
         # avg_r1 = np.mean(all_rouge1)
         # avg_r2 = np.mean(all_rouge2) # [ADDED]
-        avg_rL = np.mean(all_rougeL)
-        
+        # avg_rL = np.mean(all_rougeL)
+        avg_rP, avg_rR, avg_rF1 = calculate_f1(test_TP, test_FP, test_FN)
         logger.info(f"***** TEST RESULTS *****")
         # logger.info(f"Test ROUGE-1: {avg_r1:.4f}")
         # logger.info(f"Test ROUGE-2: {avg_r2:.4f}")
-        logger.info(f"Test ROUGE-L: {avg_rL:.4f}")
-
+        # logger.info(f"Test ROUGE-L: {avg_rL:.4f}")
+        logger.info(f"Test Precision: {avg_rP:.4f}") # [CHANGED]
+        logger.info(f"Test Recall:    {avg_rR:.4f}") # [CHANGED]
+        logger.info(f"Test F1-Score:  {avg_rF1:.4f}") # [CHANGED]
         log_path = f"{args.output_dir}/test_predictions_formatted.txt"
+        
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"TEST METRICS:\n")
             # f.write(f"ROUGE-1: {avg_r1:.4f}\n")
             # f.write(f"ROUGE-2: {avg_r2:.4f}\n")
-            f.write(f"ROUGE-L: {avg_rL:.4f}\n")
+            # f.write(f"ROUGE-L: {avg_rL:.4f}\n")
+            f.write(f"Precision: {avg_rP:.4f}\n")
+            f.write(f"Recall: {avg_rR:.4f}\n")
+            f.write(f"F1-Score: {avg_rF1:.4f}\n")
             f.write("="*50 + "\n\n")
             
             for i, sample in enumerate(all_test_results):
