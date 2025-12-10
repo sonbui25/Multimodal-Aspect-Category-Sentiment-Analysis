@@ -221,7 +221,7 @@ def main():
                         # Tạo mask: 1 nếu KHÔNG PHẢI none (cần học), 0 nếu là none (bỏ qua)
                         # Lưu ý: strip() để xóa khoảng trắng thừa
                         valid_sample_mask = torch.tensor(
-                            [0 if "none" in lbl.lower().strip() else 1 for lbl in decoded_batch_labels]
+                            [0.1 if "none" in lbl.lower().strip() else 1 for lbl in decoded_batch_labels]
                         ).to(device)
                         
                         # Nếu cả batch toàn là none thì bỏ qua luôn aspect này để tiết kiệm tính toán
