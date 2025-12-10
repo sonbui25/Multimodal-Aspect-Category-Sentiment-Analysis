@@ -194,11 +194,11 @@ def main():
                     # ==============================================================================
                     # [FIXED STRATEGY] SAMPLE-WISE WEIGHTING
                     # Sentiment Samples: Weight = 1.0 (Học mạnh)
-                    # None Samples:      Weight = 0.1 (Học nhẹ để tránh spam, giữ negative constraint)
+                    # None Samples:      Weight = NONE_SAMPLE_WEIGHT (Học nhẹ để tránh spam, giữ negative constraint)
                     # ==============================================================================
                     
                     # Định nghĩa trọng số cho mẫu None (Tune số này: 0.1, 0.15, 0.2)
-                    NONE_SAMPLE_WEIGHT = 0.1
+                    NONE_SAMPLE_WEIGHT = 0.05
                     
                     total_loss = 0
                     
@@ -218,7 +218,7 @@ def main():
                         lbl_ids = np.where(lbl_ids != -100, lbl_ids, tokenizer.pad_token_id)
                         decoded_texts = tokenizer.batch_decode(lbl_ids, skip_special_tokens=True)
                         
-                        # Tạo mask trọng số: 1.0 cho sentiment, 0.1 cho none
+                        # Tạo mask trọng số: 1.0 cho sentiment, NONE_SAMPLE_WEIGHT cho none
                         batch_sample_weights = []
                         for txt in decoded_texts:
                             clean_txt = txt.lower().strip()
