@@ -23,21 +23,29 @@ from torch.cuda.amp import autocast
 import os
 from rouge_score import rouge_scorer
 
-def save_model(path, model, optimizer, scheduler, epoch, best_score):
+def save_model(path, model, optimizer, scheduler, epoch, best_score, scaler=None):
     if hasattr(model, 'module'): model_state = model.module.state_dict()
     else: model_state = model.state_dict()
-    torch.save({
+    
+    checkpoint_dict = {
         "epoch": epoch,
         "model_state_dict": model_state,
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "best_score": best_score, 
-    }, path)
+    }
+    
+    if scaler is not None:
+        checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
+
+    torch.save(checkpoint_dict, path)
+
 def calculate_f1(TP, FP, FN):
     precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
     recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     return precision, recall, f1
+
 def main():
     parser = argparse.ArgumentParser()
     # --- ARGUMENTS ---
@@ -91,7 +99,9 @@ def main():
     logger = logging.getLogger(__name__)
     if master_process: os.makedirs(args.output_dir, exist_ok=True)
 
+    # Chia batch size cho accumulation steps
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
+    
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     if ddp_world_size > 1: torch.cuda.manual_seed_all(args.seed)
 
@@ -146,23 +156,72 @@ def main():
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    # criterion = torch.nn.CrossEntropyLoss(ignore_index=-100) 
-    scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
     
-    num_train_steps = len(train_dataset) // args.train_batch_size * args.num_train_epochs if args.do_train else 0
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_train_steps*args.warmup_proportion, num_training_steps=num_train_steps)
+    if args.fp16:
+        scaler = torch.amp.GradScaler('cuda')
+    else:
+        scaler = None
+    
+    # --- SCHEDULER SETUP (NEW LOGIC) ---
+    num_train_steps = 0
+    if args.do_train:
+        # Tính toán dựa trên CẤU HÌNH MỚI (args.num_train_epochs có thể là 36 thay vì 18)
+        # Lưu ý: args.train_batch_size đã được chia cho accum_steps ở trên
+        # Công thức: Tổng số mẫu / Batch per device / Accumulation * Epochs
+        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+        
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps*args.warmup_proportion), num_training_steps=num_train_steps)
 
     start_epoch = 0
-    max_f1_score = 0.0 # [CHANGED] Đổi thành max_f1_score
+    max_f1_score = 0.0 
 
-    if args.resume_from_checkpoint and os.path.isfile(args.resume_from_checkpoint):
-        ckpt = torch.load(args.resume_from_checkpoint, map_location=device)
-        model.load_state_dict(ckpt['model_state_dict']) if not isinstance(model, DDP) else model.module.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-        start_epoch = ckpt['epoch'] + 1
-        if 'best_score' in ckpt: max_rougeL = ckpt['best_score']
-        logger.info(f"Resumed from epoch {start_epoch}, Best ROUGE-L: {max_rougeL}")
+    # ================= RESUME LOGIC (MANUAL SYNC) =================
+    if args.resume_from_checkpoint:
+        checkpoint_path = args.resume_from_checkpoint
+        if os.path.isfile(checkpoint_path):
+            if master_process: logger.info(f"--> Resuming from checkpoint: {checkpoint_path}")
+            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            
+            # 1. Load Main Model Weights
+            if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
+            else: model.load_state_dict(ckpt['model_state_dict'])
+            
+            # 2. Load ResNets Weights
+            resimg_path = checkpoint_path.replace("iaog_model", "resimg_model")
+            resroi_path = checkpoint_path.replace("iaog_model", "resroi_model")
+            
+            if os.path.exists(resimg_path):
+                if master_process: logger.info(f"    Loading ResNet Img: {resimg_path}")
+                unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
+                unwrap_resimg.load_state_dict(torch.load(resimg_path, map_location=device, weights_only=False)['model_state_dict'])
+            
+            if os.path.exists(resroi_path):
+                if master_process: logger.info(f"    Loading ResNet RoI: {resroi_path}")
+                unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
+                unwrap_resroi.load_state_dict(torch.load(resroi_path, map_location=device, weights_only=False)['model_state_dict'])
+
+            # 3. Load Optimizer State (để giữ momentum)
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            
+            # 4. KHÔNG Load Scheduler State -> Thay vào đó là tua nhanh
+            start_epoch = ckpt['epoch'] + 1
+            if 'best_score' in ckpt: max_f1_score = ckpt['best_score']
+            
+            # Tính số bước đã thực hiện dựa trên epoch đã chạy
+            steps_already_done = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * start_epoch)
+            
+            # Tua nhanh scheduler
+            if master_process: logger.info(f"    Fast-forwarding scheduler by {steps_already_done} steps...")
+            for _ in range(steps_already_done):
+                scheduler.step()
+
+            # 5. Load Scaler State (nếu có)
+            if args.fp16 and 'scaler_state_dict' in ckpt and scaler is not None:
+                scaler.load_state_dict(ckpt['scaler_state_dict'])
+            
+            if master_process: logger.info(f"Resumed at epoch {start_epoch}, Best F1: {max_f1_score}")
+        else:
+            if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
 
     # Rouge Scorer
     scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
@@ -187,23 +246,15 @@ def main():
                 
                 roi_img_f = roi_img_f.float()
 
-                with torch.cuda.amp.autocast(enabled=args.fp16):
+                with torch.amp.autocast('cuda', enabled=args.fp16):
                     with torch.no_grad():
                         enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                         vis_embeds = torch.stack(enc_imgs, dim=1)
                         enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                    # --- LOOP QUA 6 ASPECT ---
-                    # ==============================================================================
-                    # [FIXED STRATEGY] SAMPLE-WISE WEIGHTING
-                    # Sentiment Samples: Weight = 1.0 (Học mạnh)
-                    # None Samples:      Weight = NONE_SAMPLE_WEIGHT (Học nhẹ để tránh spam, giữ negative constraint)
-                    # ==============================================================================
-                    
-                    # Định nghĩa trọng số cho mẫu None (Tune số này: 0.1, 0.15, 0.2)
+                    # --- LOSS CALCULATION ---
                     NONE_SAMPLE_WEIGHT = 0.05
-                    
                     total_loss = 0
                     
                     for id_asp in range(6):
@@ -215,14 +266,10 @@ def main():
                         dec_ids = all_dec_ids[:, id_asp, :]
                         labels = all_labels[:, id_asp, :]
 
-                        # 1. Xác định mẫu nào là 'none', mẫu nào là 'sentiment'
-                        # Decode label ra text để kiểm tra chính xác tuyệt đối
-                        # (Lưu ý: labels đang là tensor trên GPU, cần chuyển về cpu numpy để decode)
                         lbl_ids = labels.detach().cpu().numpy()
                         lbl_ids = np.where(lbl_ids != -100, lbl_ids, tokenizer.pad_token_id)
                         decoded_texts = tokenizer.batch_decode(lbl_ids, skip_special_tokens=True)
                         
-                        # Tạo mask trọng số: 1.0 cho sentiment, NONE_SAMPLE_WEIGHT cho none
                         batch_sample_weights = []
                         for txt in decoded_texts:
                             clean_txt = txt.lower().strip()
@@ -231,31 +278,19 @@ def main():
                             else:
                                 batch_sample_weights.append(1.0)
                         
-                        # Chuyển thành tensor đưa lên GPU
-                        sample_weights = torch.tensor(batch_sample_weights, device=device) # Shape: [Batch]
+                        sample_weights = torch.tensor(batch_sample_weights, device=device) 
 
-                        # 2. Forward Model
                         logits = model(enc_X=enc_ids, dec_X=dec_ids, 
                                     visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
                                     token_type_ids=enc_type, attention_mask=enc_mask, added_attention_mask=add_mask, is_train=True)
                         
-                        # 3. Tính Loss riêng cho từng mẫu (reduction='none')
                         loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
-                        
-                        # Logits: [Batch, Seq, Vocab] -> Permute: [Batch, Vocab, Seq]
-                        loss_per_token = loss_fct(logits.permute(0, 2, 1), labels) # -> [Batch, Seq]
-                        loss_per_sample = loss_per_token.sum(dim=1) # -> [Batch] (Tổng loss của câu)
-                        
-                        # 4. Áp dụng trọng số
+                        loss_per_token = loss_fct(logits.permute(0, 2, 1), labels) 
+                        loss_per_sample = loss_per_token.sum(dim=1) 
                         weighted_loss = loss_per_sample * sample_weights
-                        
-                        # 5. Tính trung bình (Chia cho tổng trọng số để loss không bị nhỏ đi một cách giả tạo)
-                        # Hoặc đơn giản là mean() nếu bạn muốn loss phản ánh đúng tỷ lệ đóng góp
                         loss_asp = weighted_loss.mean() 
-                        
                         total_loss += loss_asp
 
-                # Scale và Backward như cũ...
                 if args.gradient_accumulation_steps > 1:
                     total_loss = total_loss / args.gradient_accumulation_steps
 
@@ -275,10 +310,6 @@ def main():
                 logger.info("***** Running evaluation on Dev Set with BEAM SEARCH *****")
                 model.eval(); resnet_img.eval(); resnet_roi.eval()
                 
-                total_val_loss = 0
-                # val_rouge1_scores = []
-                # val_rouge2_scores = [] # [ADDED] List chứa điểm Rouge-2
-                # val_rougeL_scores = [] # [ADDED] List chứa điểm Rouge-L
                 total_TP = 0
                 total_FP = 0
                 total_FN = 0
@@ -294,15 +325,6 @@ def main():
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
                         for id_asp in range(6):
-                            # # --- A. TÍNH LOSS (Teacher Forcing) ---
-                            # logits_tf = model(enc_X=all_enc_ids[:,id_asp], dec_X=all_dec_ids[:,id_asp],
-                            #                visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
-                            #                token_type_ids=all_enc_type[:,id_asp], attention_mask=all_enc_mask[:,id_asp], 
-                            #                added_attention_mask=all_add_mask[:,id_asp], is_train=True)
-                            # loss_item = criterion(logits_tf.reshape(-1, logits_tf.size(-1)), all_labels[:,id_asp].reshape(-1)).item()
-                            # total_val_loss += loss_item
-
-                            # --- B. SINH TEXT BẰNG BEAM SEARCH ---
                             batch_size = all_enc_ids.shape[0]
                             decoded_preds = []
                             
@@ -323,55 +345,42 @@ def main():
                                 )[0]
                                 decoded_preds.append(pred)
 
-                            # --- C. TÍNH ROUGE L ---
                             lbls = all_labels[:,id_asp].cpu().numpy()
                             lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
                             decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
+                            
                             def parse_sentiment_string(text):
                                 if not text or text.lower().strip() == 'none':
                                     return set()
                                 return set(s.strip() for s in text.lower().split(','))
                             
                             for p_text, g_text in zip(decoded_preds, decoded_lbls):
-                                # [ADDED] Tiền xử lý predict: Nếu có "n " ở đầu (từ Beam Search), xóa đi
                                 if p_text.startswith("n ") and len(p_text) > 2: p_text = p_text[2:]
                                 
-                                # [ADDED] Phân tích chuỗi thành tập hợp các từ cảm xúc
                                 pred_set = parse_sentiment_string(p_text)
                                 gold_set = parse_sentiment_string(g_text)
                                 
-                                # [ADDED] Tính TP, FP, FN cho MẪU NÀY
                                 TP = len(pred_set.intersection(gold_set))
                                 FP = len(pred_set.difference(gold_set))
                                 FN = len(gold_set.difference(pred_set))
                                 
-                                # [ADDED] Cập nhật tổng
                                 total_TP += TP
                                 total_FP += FP
                                 total_FN += FN
-                                # val_rouge1_scores.append(scores['rouge1'].fmeasure)
-                                # val_rouge2_scores.append(scores['rouge2'].fmeasure) # [ADDED]
-                                # val_rougeL_scores.append(scores['rougeL'].fmeasure) # [ADDED]
 
-                # avg_val_loss = total_val_loss / (len(dev_loader) * 6)
-                # avg_val_rouge1 = np.mean(val_rouge1_scores) if val_rouge1_scores else 0.0
-                # avg_val_rouge2 = np.mean(val_rouge2_scores) if val_rouge2_scores else 0.0 # [ADDED]
-                # avg_val_rougeL = np.mean(val_rougeL_scores) if val_rougeL_scores else 0.0 # [ADDED]
                 avg_val_P, avg_val_R, avg_val_F1 = calculate_f1(total_TP, total_FP, total_FN)
-                # [CHANGED] Log cả 3 chỉ số
                 logger.info(f"Epoch {epoch} | P: {avg_val_P:.4f} | R: {avg_val_R:.4f} | F1: {avg_val_F1:.4f}")
 
-                # [CHANGED] Tối ưu hóa dựa trên ROUGE-L
                 if avg_val_F1 > max_f1_score:
                     max_f1_score = avg_val_F1
                     logger.info(f"New Best F1-Score ({max_f1_score:.4f})! Saving model...")
-                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
                     
-                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score)
+                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
                 print("\n")
 
     # --- 6. TEST (WITH BEAM SEARCH & FULL ROUGE) ---
@@ -391,9 +400,6 @@ def main():
         model.eval(); resnet_img.eval(); resnet_roi.eval()
         
         all_test_results = []
-        # all_rouge1 = []
-        # all_rouge2 = [] # [ADDED]
-        # all_rougeL = []
         test_TP = 0
         test_FP = 0
         test_FN = 0
@@ -440,45 +446,30 @@ def main():
                     for i, (p, g) in enumerate(zip(decoded_preds, decoded_lbls)):
                         if p.startswith("n ") and len(p) > 2: p = p[2:]
                         
-                        # [ADDED] Phân tích chuỗi thành tập hợp các từ cảm xúc
                         pred_set = parse_sentiment_string(p)
                         gold_set = parse_sentiment_string(g)
                         
-                        # [ADDED] Tính TP, FP, FN cho MẪU NÀY
                         TP = len(pred_set.intersection(gold_set))
                         FP = len(pred_set.difference(gold_set))
                         FN = len(gold_set.difference(pred_set))
                         
-                        # [ADDED] Cập nhật tổng
                         test_TP += TP
                         test_FP += FP
                         test_FN += FN
                         
                         batch_results[i]["aspects"][aspect_name] = {"predict": p, "label": g}
-                        # all_rouge1.append(scores['rouge1'].fmeasure)
-                        # all_rouge2.append(scores['rouge2'].fmeasure) # [ADDED]
-                        # all_rougeL.append(scores['rougeL'].fmeasure)
                 
                 all_test_results.extend(batch_results)
 
-        # avg_r1 = np.mean(all_rouge1)
-        # avg_r2 = np.mean(all_rouge2) # [ADDED]
-        # avg_rL = np.mean(all_rougeL)
         avg_rP, avg_rR, avg_rF1 = calculate_f1(test_TP, test_FP, test_FN)
         logger.info(f"***** TEST RESULTS *****")
-        # logger.info(f"Test ROUGE-1: {avg_r1:.4f}")
-        # logger.info(f"Test ROUGE-2: {avg_r2:.4f}")
-        # logger.info(f"Test ROUGE-L: {avg_rL:.4f}")
-        logger.info(f"Test Precision: {avg_rP:.4f}") # [CHANGED]
-        logger.info(f"Test Recall:    {avg_rR:.4f}") # [CHANGED]
-        logger.info(f"Test F1-Score:  {avg_rF1:.4f}") # [CHANGED]
+        logger.info(f"Test Precision: {avg_rP:.4f}") 
+        logger.info(f"Test Recall:    {avg_rR:.4f}") 
+        logger.info(f"Test F1-Score:  {avg_rF1:.4f}") 
         log_path = f"{args.output_dir}/test_predictions_formatted.txt"
         
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"TEST METRICS:\n")
-            # f.write(f"ROUGE-1: {avg_r1:.4f}\n")
-            # f.write(f"ROUGE-2: {avg_r2:.4f}\n")
-            # f.write(f"ROUGE-L: {avg_rL:.4f}\n")
             f.write(f"Precision: {avg_rP:.4f}\n")
             f.write(f"Recall: {avg_rR:.4f}\n")
             f.write(f"F1-Score: {avg_rF1:.4f}\n")
