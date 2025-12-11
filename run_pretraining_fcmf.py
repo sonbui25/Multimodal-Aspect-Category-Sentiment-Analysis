@@ -347,7 +347,7 @@ def main():
                 
                 # --- LOGIC TƯƠNG TỰ RUN_MULTIMODAL: Tính Score từng Aspect rồi cộng dồn ---
                 for asp in ASPECT_LIST:
-                    P, R, F1 = score(val_preds[asp], val_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device)
+                    P, R, F1 = score(val_preds[asp], val_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
                     
                     asp_P = P.mean().item()
                     asp_R = R.mean().item()
@@ -459,7 +459,7 @@ def main():
             f.write("-" * 50 + "\n")
             
             for asp in ASPECT_LIST:
-                P, R, F1 = score(test_preds[asp], test_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device)
+                P, R, F1 = score(test_preds[asp], test_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
                 
                 asp_P = P.mean().item()
                 asp_R = R.mean().item()
