@@ -22,6 +22,8 @@ import json
 from torch.cuda.amp import autocast 
 import os
 from rouge_score import rouge_scorer
+# --- CHANGED: Import BERTScore ---
+from bert_score import score
 
 def save_model(path, model, optimizer, scheduler, epoch, best_score, scaler=None):
     if hasattr(model, 'module'): model_state = model.module.state_dict()
@@ -40,11 +42,7 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score, scaler=None
 
     torch.save(checkpoint_dict, path)
 
-def calculate_f1(TP, FP, FN):
-    precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
-    recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    return precision, recall, f1
+# --- CHANGED: Removed calculate_f1 as it is replaced by BERTScore ---
 
 def main():
     parser = argparse.ArgumentParser()
@@ -53,6 +51,7 @@ def main():
     parser.add_argument("--pretrained_data_dir", default='../iaog-pretraining', type=str, required=True)
     parser.add_argument("--output_dir", default=None, type=str, required=True)
     parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True)
+    parser.add_argument('--bert_score_model', default='uitnlp/visobert', type=str)
     parser.add_argument('--image_dir', default='../vimacsa/image')
     parser.add_argument('--resnet_label_path', default='/kaggle/input/resnet-output')
     parser.add_argument("--resume_from_checkpoint", default=None, type=str)
@@ -99,7 +98,6 @@ def main():
     logger = logging.getLogger(__name__)
     if master_process: os.makedirs(args.output_dir, exist_ok=True)
 
-    # Chia batch size cho accumulation steps
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
     
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -162,12 +160,8 @@ def main():
     else:
         scaler = None
     
-    # --- SCHEDULER SETUP (NEW LOGIC) ---
     num_train_steps = 0
     if args.do_train:
-        # Tính toán dựa trên CẤU HÌNH MỚI (args.num_train_epochs có thể là 36 thay vì 18)
-        # Lưu ý: args.train_batch_size đã được chia cho accum_steps ở trên
-        # Công thức: Tổng số mẫu / Batch per device / Accumulation * Epochs
         num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
         
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps*args.warmup_proportion), num_training_steps=num_train_steps)
@@ -175,18 +169,15 @@ def main():
     start_epoch = 0
     max_f1_score = 0.0 
 
-    # ================= RESUME LOGIC (MANUAL SYNC) =================
     if args.resume_from_checkpoint:
         checkpoint_path = args.resume_from_checkpoint
         if os.path.isfile(checkpoint_path):
             if master_process: logger.info(f"--> Resuming from checkpoint: {checkpoint_path}")
             ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
-            # 1. Load Main Model Weights
             if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
             else: model.load_state_dict(ckpt['model_state_dict'])
             
-            # 2. Load ResNets Weights
             resimg_path = checkpoint_path.replace("iaog_model", "resimg_model")
             resroi_path = checkpoint_path.replace("iaog_model", "resroi_model")
             
@@ -200,31 +191,23 @@ def main():
                 unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
                 unwrap_resroi.load_state_dict(torch.load(resroi_path, map_location=device, weights_only=False)['model_state_dict'])
 
-            # 3. Load Optimizer State (để giữ momentum)
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             
-            # 4. KHÔNG Load Scheduler State -> Thay vào đó là tua nhanh
             start_epoch = ckpt['epoch'] + 1
             if 'best_score' in ckpt: max_f1_score = ckpt['best_score']
             
-            # Tính số bước đã thực hiện dựa trên epoch đã chạy
             steps_already_done = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * start_epoch)
             
-            # Tua nhanh scheduler
             if master_process: logger.info(f"    Fast-forwarding scheduler by {steps_already_done} steps...")
             for _ in range(steps_already_done):
                 scheduler.step()
 
-            # 5. Load Scaler State (nếu có)
             if args.fp16 and 'scaler_state_dict' in ckpt and scaler is not None:
                 scaler.load_state_dict(ckpt['scaler_state_dict'])
             
             if master_process: logger.info(f"Resumed at epoch {start_epoch}, Best F1: {max_f1_score}")
         else:
             if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
-
-    # Rouge Scorer
-    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
     # --- 5. TRAINING LOOP ---
     if args.do_train:
@@ -253,7 +236,6 @@ def main():
                         enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                    # --- LOSS CALCULATION ---
                     NONE_SAMPLE_WEIGHT = 0.05
                     total_loss = 0
                     
@@ -310,9 +292,10 @@ def main():
                 logger.info("***** Running evaluation on Dev Set with BEAM SEARCH *****")
                 model.eval(); resnet_img.eval(); resnet_roi.eval()
                 
-                total_TP = 0
-                total_FP = 0
-                total_FN = 0
+                # --- CHANGED: Storage for BERTScore ---
+                val_preds = []
+                val_refs = []
+                
                 with torch.no_grad():
                     for batch in tqdm(dev_loader, desc="Eval Beam", leave=False):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
@@ -349,26 +332,21 @@ def main():
                             lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
                             decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
                             
-                            def parse_sentiment_string(text):
-                                if not text or text.lower().strip() == 'none':
-                                    return set()
-                                return set(s.strip() for s in text.lower().split(','))
-                            
+                            # --- CHANGED: Collect predictions for BERTScore ---
                             for p_text, g_text in zip(decoded_preds, decoded_lbls):
                                 if p_text.startswith("n ") and len(p_text) > 2: p_text = p_text[2:]
                                 
-                                pred_set = parse_sentiment_string(p_text)
-                                gold_set = parse_sentiment_string(g_text)
-                                
-                                TP = len(pred_set.intersection(gold_set))
-                                FP = len(pred_set.difference(gold_set))
-                                FN = len(gold_set.difference(pred_set))
-                                
-                                total_TP += TP
-                                total_FP += FP
-                                total_FN += FN
+                                val_preds.append(p_text)
+                                val_refs.append(g_text)
 
-                avg_val_P, avg_val_R, avg_val_F1 = calculate_f1(total_TP, total_FP, total_FN)
+                # --- CHANGED: Compute BERTScore ---
+                logger.info("Computing BERTScore for Dev Set...")
+                P, R, F1 = score(val_preds, val_refs, lang='vi', model_type=args.bert_score_model, verbose=False, device=device)
+                
+                avg_val_P = P.mean().item()
+                avg_val_R = R.mean().item()
+                avg_val_F1 = F1.mean().item()
+                
                 logger.info(f"Epoch {epoch} | P: {avg_val_P:.4f} | R: {avg_val_R:.4f} | F1: {avg_val_F1:.4f}")
 
                 if avg_val_F1 > max_f1_score:
@@ -400,9 +378,11 @@ def main():
         model.eval(); resnet_img.eval(); resnet_roi.eval()
         
         all_test_results = []
-        test_TP = 0
-        test_FP = 0
-        test_FN = 0
+        
+        # --- CHANGED: Storage for BERTScore ---
+        test_preds = []
+        test_refs = []
+        
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Test with Beam Search"):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
@@ -446,22 +426,21 @@ def main():
                     for i, (p, g) in enumerate(zip(decoded_preds, decoded_lbls)):
                         if p.startswith("n ") and len(p) > 2: p = p[2:]
                         
-                        pred_set = parse_sentiment_string(p)
-                        gold_set = parse_sentiment_string(g)
-                        
-                        TP = len(pred_set.intersection(gold_set))
-                        FP = len(pred_set.difference(gold_set))
-                        FN = len(gold_set.difference(pred_set))
-                        
-                        test_TP += TP
-                        test_FP += FP
-                        test_FN += FN
+                        # --- CHANGED: Collect for BERTScore ---
+                        test_preds.append(p)
+                        test_refs.append(g)
                         
                         batch_results[i]["aspects"][aspect_name] = {"predict": p, "label": g}
                 
                 all_test_results.extend(batch_results)
 
-        avg_rP, avg_rR, avg_rF1 = calculate_f1(test_TP, test_FP, test_FN)
+        # --- CHANGED: Compute BERTScore ---
+        logger.info("Computing BERTScore for Test Set...")
+        P, R, F1 = score(test_preds, test_refs, lang='vi', model_type=args.bert_score_model, verbose=True, device=device)
+        avg_rP = P.mean().item()
+        avg_rR = R.mean().item()
+        avg_rF1 = F1.mean().item()
+
         logger.info(f"***** TEST RESULTS *****")
         logger.info(f"Test Precision: {avg_rP:.4f}") 
         logger.info(f"Test Recall:    {avg_rR:.4f}") 
