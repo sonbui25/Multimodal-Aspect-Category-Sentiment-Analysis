@@ -22,7 +22,7 @@ import torch.distributed as dist
 import json
 from torch.cuda.amp import autocast
 import os
-
+from torch.optim.lr_scheduler import LambdaLR
 # Map numeric labels back to string for logging
 POLARITY_MAP = {0: 'None', 1: 'Negative', 2: 'Neutral', 3: 'Positive'}
 
@@ -335,13 +335,14 @@ def main():
             # 4. ĐIỀU CHỈNH scheduler cho config mới
             start_epoch = checkpoint['epoch'] + 1
             
-            # Tính số steps đã hoàn thành
-            steps_already_done = int(len(train_dataset) / args.train_batch_size / 
-                                    args.gradient_accumulation_steps * start_epoch)
+             # Set LR mới - CAO HƠN để học nhanh
+            optimizer.param_groups[0]['lr'] = args.encoder_lr  # Encoder
+            optimizer.param_groups[1]['lr'] = args.encoder_lr
+            optimizer.param_groups[2]['lr'] = args.head_lr  # Head
+            optimizer.param_groups[3]['lr'] = args.head_lr
             
-            # Set step_count cho scheduler
-            for _ in range(steps_already_done):
-                scheduler.step()  # Thủ công "chạy" đến đúng step
+            # Constant scheduler
+            scheduler = LambdaLR(optimizer, lambda epoch: 1.0)
             # 5. Load Scaler (Nếu có, để fix lỗi FP16)
             if args.fp16 and 'scaler_state_dict' in checkpoint and 'scaler' in locals():
                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
