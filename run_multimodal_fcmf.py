@@ -336,10 +336,10 @@ def main():
             start_epoch = checkpoint['epoch'] + 1
             
              # Set LR mới - CAO HƠN để học nhanh
-            optimizer.param_groups[0]['lr'] = args.encoder_lr  # Encoder
-            optimizer.param_groups[1]['lr'] = args.encoder_lr
-            optimizer.param_groups[2]['lr'] = args.head_lr  # Head
-            optimizer.param_groups[3]['lr'] = args.head_lr
+            optimizer.param_groups[0]['lr'] = args.encoder_learning_rate # Encoder
+            optimizer.param_groups[1]['lr'] = args.encoder_learning_rate
+            optimizer.param_groups[2]['lr'] = args.classifier_head_learning_rate  # Head
+            optimizer.param_groups[3]['lr'] = args.classifier_head_learning_rate
             
             # Constant scheduler
             scheduler = LambdaLR(optimizer, lambda epoch: 1.0)
