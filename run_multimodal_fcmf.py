@@ -343,7 +343,7 @@ def main():
             
             # Constant scheduler
             scheduler = LambdaLR(optimizer, lambda epoch: 1.0)
-            # 5. Load Scaler (Nếu có, để fix lỗi FP16)
+            # 5. Load Scaler
             if args.fp16 and 'scaler_state_dict' in checkpoint and 'scaler' in locals():
                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
                 if master_process: logger.info("--> Scaler state loaded.")
@@ -365,7 +365,7 @@ def main():
         else:
             if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
 
-    # B. LOAD PRETRAINED ENCODER
+    # B. LOAD PRETRAINED ENCODER và RESNETS TỪ IAOG
     elif args.pretrained_iaog_path and os.path.isfile(args.pretrained_iaog_path):
         if master_process: logger.info(f"--> Loading Encoder weights from Pretraining: {args.pretrained_iaog_path}")
         iaog_ckpt = torch.load(args.pretrained_iaog_path, map_location='cpu', weights_only=False)
