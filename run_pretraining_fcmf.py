@@ -385,14 +385,28 @@ def main():
             test_loader = DataLoader(IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder), batch_size=args.eval_batch_size)
         except: return
 
-        ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
+        # ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
+        ckpt_path = f'/kaggle/input/iaog-bert-score/pytorch/30_epoch/4/seed_42_iaog_model_best.pth'
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
             else: model.load_state_dict(ckpt['model_state_dict'])
-        
-        model.eval(); resnet_img.eval(); resnet_roi.eval()
-        
+            
+            # Load ResNet Image
+            resimg_path = ckpt_path.replace("iaog_model", "resimg_model")
+            if os.path.exists(resimg_path):
+                resimg_ckpt = torch.load(resimg_path, map_location=device, weights_only=False)
+                unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
+                unwrap_resimg.load_state_dict(resimg_ckpt['model_state_dict'])
+            
+            # Load ResNet RoI
+            resroi_path = ckpt_path.replace("iaog_model", "resroi_model")
+            if os.path.exists(resroi_path):
+                resroi_ckpt = torch.load(resroi_path, map_location=device, weights_only=False)
+                unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
+                unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
+                model.eval(); resnet_img.eval(); resnet_roi.eval()
+                
         all_test_results = []
         
         # --- CHANGED: Storage for BERTScore (Test) ---
