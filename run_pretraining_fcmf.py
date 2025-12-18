@@ -170,15 +170,22 @@ def main():
     start_epoch = 0
     max_f1_score = 0.0 
 
+    # A. RESUME (Pretraining)
     if args.resume_from_checkpoint:
         checkpoint_path = args.resume_from_checkpoint
         if os.path.isfile(checkpoint_path):
             if master_process: logger.info(f"--> Resuming from checkpoint: {checkpoint_path}")
+            
+            # Load file checkpoint
             ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
-            if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
-            else: model.load_state_dict(ckpt['model_state_dict'])
+            # 1. Load Model Weights
+            if isinstance(model, (DDP, torch.nn.DataParallel)): 
+                model.module.load_state_dict(ckpt['model_state_dict'])
+            else: 
+                model.load_state_dict(ckpt['model_state_dict'])
             
+            # 2. Load ResNet
             resimg_path = checkpoint_path.replace("iaog_model", "resimg_model")
             resroi_path = checkpoint_path.replace("iaog_model", "resroi_model")
             
@@ -192,24 +199,28 @@ def main():
                 unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
                 unwrap_resroi.load_state_dict(torch.load(resroi_path, map_location=device, weights_only=False)['model_state_dict'])
 
+            # 3. Load Optimizer
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             
-            start_epoch = ckpt['epoch'] + 1
-            if 'best_score' in ckpt: max_f1_score = ckpt['best_score']
-            
-            steps_already_done = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * start_epoch)
-            
-            if master_process: logger.info(f"    Fast-forwarding scheduler by {steps_already_done} steps...")
-            for _ in range(steps_already_done):
-                scheduler.step()
+            # 4. Load Scheduler
+            if 'scheduler_state_dict' in ckpt:
+                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+                if master_process: logger.info("--> Scheduler state loaded successfully.")
 
+            # 5. Load Scaler
             if args.fp16 and 'scaler_state_dict' in ckpt and scaler is not None:
                 scaler.load_state_dict(ckpt['scaler_state_dict'])
             
-            if master_process: logger.info(f"Resumed at epoch {start_epoch}, Best F1: {max_f1_score}")
+            # 6. Thiết lập epoch bắt đầu
+            start_epoch = ckpt['epoch'] + 1
+            if 'best_score' in ckpt: max_f1_score = ckpt['best_score']
+            
+            if master_process: 
+                logger.info(f"Resumed at epoch {start_epoch}, Best F1: {max_f1_score}")
+                # Kiểm tra LR thực tế sau khi load
+                logger.info(f"Current LR after resume: {optimizer.param_groups[0]['lr']:.2e}")
         else:
             if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
-
     # --- 5. TRAINING LOOP ---
     if args.do_train:
         train_loader = DataLoader(train_dataset, sampler=DistributedSampler(train_dataset) if args.ddp else RandomSampler(train_dataset), batch_size=args.train_batch_size)
