@@ -385,8 +385,8 @@ def main():
             test_loader = DataLoader(IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder), batch_size=args.eval_batch_size)
         except: return
 
-        # ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
-        ckpt_path = f'/kaggle/input/iaog-bert-score/pytorch/30_epoch/4/seed_42_iaog_model_best.pth'
+        ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
+        # ckpt_path = f'/kaggle/input/iaog-bert-score/pytorch/30_epoch/4/seed_42_iaog_model_best.pth'
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])

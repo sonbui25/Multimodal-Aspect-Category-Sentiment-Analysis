@@ -25,7 +25,7 @@ class myResNetImg(nn.Module):
 
         if not self.if_fine_tune:
             
-            att = Variable(att.data)
+            att = Variable(att.data) # to prevent from computing gradients
 
         return att
     
@@ -51,6 +51,6 @@ class myResNetRoI(nn.Module):
 
         if not self.if_fine_tune:
             
-            fc = Variable(fc.data)
+            fc = Variable(fc.data) # to prevent from computing gradients
 
         return fc

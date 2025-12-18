@@ -311,7 +311,6 @@ def main():
                 model.load_state_dict(checkpoint['model_state_dict'])
             
             # 2. Load ResNet Weights
-            # Thay ten file ResNet dựa trên tên file checkpoint chính
             dir_name = os.path.dirname(checkpoint_path)
             
             resimg_path = checkpoint_path.replace("fcmf_model", "resimg_model")
@@ -329,22 +328,20 @@ def main():
                 unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
                 unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
 
-             # 3. Load optimizer
+            # 3. Load optimizer
+            # Việc này sẽ khôi phục lại Learning Rate tại thời điểm lưu file (cuối epoch 6)
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             
-            # 4. ĐIỀU CHỈNH scheduler cho config mới
+            # 4. Load Scheduler State
+            # [QUAN TRỌNG] Thay vì set cứng lại LR, ta load state của scheduler.
+            # Scheduler sẽ biết được "đã chạy bao nhiêu bước" và tiếp tục giảm LR theo biểu đồ linear decay
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
             start_epoch = checkpoint['epoch'] + 1
             
-             # Set LR mới - CAO HƠN để học nhanh
-            optimizer.param_groups[0]['lr'] = args.encoder_learning_rate # Encoder
-            optimizer.param_groups[1]['lr'] = args.encoder_learning_rate
-            optimizer.param_groups[2]['lr'] = args.classifier_head_learning_rate  # Head
-            optimizer.param_groups[3]['lr'] = args.classifier_head_learning_rate
-            
-            # Constant scheduler
-            scheduler = LambdaLR(optimizer, lambda epoch: 1.0)
-            # 5. Load Scaler
-            if args.fp16 and 'scaler_state_dict' in checkpoint and 'scaler' in locals():
+            # 5. Load Scaler (nếu dùng fp16)
+            if args.fp16 and 'scaler_state_dict' in checkpoint and 'scaler' in locals() and scaler is not None:
                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
                 if master_process: logger.info("--> Scaler state loaded.")
                 
@@ -353,14 +350,13 @@ def main():
         
             if master_process:
                 logger.info("="*60)
-                logger.info("SCHEDULER STATUS:")
+                logger.info("RESUME STATUS (SMOOTH CONTINUATION):")
                 logger.info(f"  Previous Best F1: {max_f1}")
-                logger.info(f"  Total epochs planned: {args.num_train_epochs}")
-                logger.info(f"  Starting from epoch: {start_epoch}")
-                logger.info(f"  Total training steps: {num_train_steps}")
-                logger.info(f"  Steps already done: {scheduler._step_count}")
-                logger.info(f"  Current LR (encoder): {optimizer.param_groups[0]['lr']:.2e}")
-                logger.info(f"  Current LR (head):    {optimizer.param_groups[2]['lr']:.2e}")
+                logger.info(f"  Total target epochs: {args.num_train_epochs}")
+                logger.info(f"  Resuming at epoch: {start_epoch}")
+                # Lấy LR hiện tại từ optimizer (đã được load state)
+                logger.info(f"  Resumed LR (encoder): {optimizer.param_groups[0]['lr']:.2e}")
+                logger.info(f"  Resumed LR (head):    {optimizer.param_groups[2]['lr']:.2e}")
                 logger.info("="*60)
         else:
             if master_process: logger.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
