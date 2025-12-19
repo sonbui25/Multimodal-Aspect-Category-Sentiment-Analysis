@@ -180,12 +180,20 @@ def main():
     try:
         roi_df = pd.read_csv(f"{args.data_dir}/roi_data.csv")
         roi_df['file_name'] = roi_df['file_name'] + '.png'
-        
-        json_path = args.resnet_label_path if os.path.exists(f'{args.resnet_label_path}/resnet152_image_label.json') else args.data_dir
-        with open(f'{json_path}/resnet152_image_label.json') as imf: dict_image_aspect = json.load(imf)
-        with open(f'{json_path}/resnet152_roi_label.json') as rf: dict_roi_aspect = json.load(rf)
-    except Exception as e:
-        raise ValueError(f"Error loading metadata: {e}")
+        logger.info(f"ROI DataFrame loaded with {len(roi_df)} entries.")
+    except:
+        raise ValueError("Can't find roi_data.csv")
+    
+    try:
+        with open(f'{args.data_dir}/resnet152_image_label.json') as imf:
+            dict_image_aspect = json.load(imf)
+            logger.info(f"Image aspect categories loaded with {len(dict_image_aspect)} entries.")
+
+        with open(f'{args.data_dir}/resnet152_roi_label.json') as rf:
+            dict_roi_aspect = json.load(rf)
+            logger.info(f"ROI aspect categories loaded with {len(dict_roi_aspect)} entries.")
+    except:
+        raise ValueError("Get image/roi aspect category first. Please run run_image_categories.py or run_roi_categories.py")
 
     if args.do_train:
         train_data = pd.read_json(f'{args.data_dir}/train.json')
