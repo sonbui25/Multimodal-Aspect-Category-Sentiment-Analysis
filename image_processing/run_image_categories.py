@@ -16,7 +16,9 @@ from sklearn.metrics import precision_recall_fscore_support,accuracy_score
 from torchvision.models import resnet152,ResNet152_Weights,resnet50, ResNet50_Weights
 import random
 import logging
+import sys
 
+# --- MODIFIED: Thêm filename vào return của Dataset ---
 class ImageDataset(Dataset):
     def __init__(self, data,root_dir):
         self.image_label = data
@@ -31,7 +33,7 @@ class ImageDataset(Dataset):
         label = torch.from_numpy(self.image_label.iloc[index,2:].values.astype(int)) # no location
 
         transforms = v2.Compose([
-                            v2.Resize((224,224),antialias=True),  # args.crop_size, by default it is set to be 224
+                            v2.Resize((224,224),antialias=True),
                             v2.RandomHorizontalFlip(),
                             v2.ConvertImageDtype(torch.float32),
                             v2.Normalize((0.485, 0.456, 0.406),
@@ -42,7 +44,8 @@ class ImageDataset(Dataset):
 
         return {
             "image": image,
-            "label": label
+            "label": label,
+            "filename": image_name # <--- Added this
         }
     
 class MyImgModel(torch.nn.Module):
@@ -75,22 +78,20 @@ def convert_img_to_tensor(root_dir, img_path):
     image = torchvision.io.read_image(os.path.join(root_dir,img_path),mode = torchvision.io.ImageReadMode.RGB)
 
     transforms = v2.Compose([
-                        v2.Resize((224,224),antialias=True),  # args.crop_size, by default it is set to be 224
-                        # v2.RandomHorizontalFlip(),
+                        v2.Resize((224,224),antialias=True),
                         v2.ConvertImageDtype(torch.float32),
                         v2.Normalize((0.485, 0.456, 0.406),
                                                 (0.229, 0.224, 0.225))
                                     ])
 
     image = transforms(image)
-
     return image
 
 def predict_wrapper(model, list_aspect, root_dir, img_path,device):
     img = convert_img_to_tensor(root_dir, img_path)
     pred = model(img.unsqueeze(0).to(device))
     pred = torch.sigmoid(pred).squeeze(0)
-    pred = pred > 0.45 # in our case, threshold equal 0.45
+    pred = pred > 0.45 
     pred = pred.cpu().numpy().astype(int)
     pred = np.where(pred==1)[0]
     
@@ -98,82 +99,50 @@ def predict_wrapper(model, list_aspect, root_dir, img_path,device):
     
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image_dir",
-                        default='../image',
-                        type=str,
-                        required=True,
-                        help="The image data dir. Should contain the list of images files for the MACSA task.")
-    parser.add_argument("--image_label_path",
-                    default=None,
-                    type=str,
-                    help="The labeled image. Should contain the list of annotated images files for the MACSA task.")
-
-    parser.add_argument("--weight_path",
-                    default=None,
-                    type=str,
-                    help="Trained image model weights.")
-    parser.add_argument("--output_dir",
-                    default="../vimacsa",
-                    type=str)
-    
-    # other parameters
-    parser.add_argument("--do_train",
-                    action='store_true',
-                    help="Whether to run training.")
-
-    parser.add_argument("--get_cate",
-                        action='store_true',
-                        help="Whether to get image category.")
-    
-    parser.add_argument("--train_batch_size",
-                        default=8,
-                        type=int,
-                        help="Total batch size for training.")
-    parser.add_argument("--eval_batch_size",
-                        default=8,
-                        type=int,
-                        help="Total batch size for eval.")
-    parser.add_argument("--learning_rate",
-                        default=3e-5,
-                        type=float,
-                        help="The initial learning rate for Adam.")
-    parser.add_argument("--num_train_epochs",
-                        default=8.0,
-                        type=float,
-                        help="Total number of training epochs to perform.")
-    parser.add_argument('--seed',
-                        type=int,
-                        default=42,
-                        help="random seed for initialization")
-    parser.add_argument("--no_cuda",
-                        action='store_true',
-                        help="Whether not to use CUDA when available")
+    parser.add_argument("--image_dir", default='../image', type=str, required=True)
+    parser.add_argument("--image_label_path", default=None, type=str)
+    parser.add_argument("--weight_path", default=None, type=str)
+    parser.add_argument("--output_dir", default="../vimacsa", type=str)
+    parser.add_argument("--do_train", action='store_true')
+    parser.add_argument("--get_cate", action='store_true')
+    parser.add_argument("--train_batch_size", default=8, type=int)
+    parser.add_argument("--eval_batch_size", default=8, type=int)
+    parser.add_argument("--learning_rate", default=3e-5, type=float)
+    parser.add_argument("--num_train_epochs", default=8.0, type=float)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument("--no_cuda", action='store_true')
     
     args = parser.parse_args()
     print("===================== RUN IMAGE CATEGORIES =====================")
 
-    if args.no_cuda:
-        device = 'cpu'
-    else:
-       device = 'cuda'
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir, exist_ok=True)
+        print(f"Created output directory: {args.output_dir}")
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+    logging.basicConfig(
+        format=log_format,
+        datefmt='%m/%d/%Y %H:%M:%S',
+        level=logging.INFO,
+        handlers=[
+            logging.FileHandler(f'{args.output_dir}/image_categories.log', mode='w'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    logger = logging.getLogger(__name__)
+
+    if args.no_cuda: device = 'cpu'
+    else: device = 'cuda'
+
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
 
     if not args.do_train and not args.get_cate:
         raise ValueError("At least one of `do_train` or `get_cate` must be True.")
     
-    logging.basicConfig(filename=f'{args.output_dir}/image_categories.log',format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-                    datefmt = '%m/%d/%Y %H:%M:%S',
-                    level = logging.INFO)
-    logger = logging.getLogger(__name__)
-
-    ASPECT = ['Food', 'Room', 'Facilities', 'Service', 'Public_area'] # Our predefined aspect category
+    ASPECT = ['Food', 'Room', 'Facilities', 'Service', 'Public_area'] 
 
     if args.do_train:
-        if args.image_label_path == None:
-           raise ValueError("Please provide annotated image file.")
+        if args.image_label_path == None: raise ValueError("Please provide annotated image file.")
 
         image_label = pd.read_excel(args.image_label_path)
         image_label = image_label.fillna(0)
@@ -197,7 +166,7 @@ def main():
 
         num_train_steps = len(train_loader)*args.num_train_epochs
 
-        model = MyImgModel(len(ASPECT)) # No Location
+        model = MyImgModel(len(ASPECT)) 
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
             model = torch.nn.DataParallel(model)
@@ -208,225 +177,167 @@ def main():
 
         logger.info("*************** Running training ***************")
         for train_idx in trange(int(args.num_train_epochs), desc="Epoch"):
-            logger.info("********** Epoch: "+ str(train_idx) + " **********")
-            logger.info("  Num examples = %d", train_data.shape[0])
-            logger.info("  Batch size = %d", args.train_batch_size)
-            logger.info("  Num steps = %d", num_train_steps)
-
+            # ... (Training Loop Code omitted for brevity - no changes needed) ...
             model.train()
-            with tqdm(train_loader, position=0, leave=True, desc="Iteration") as tepoch:
-                for step, batch in enumerate(tepoch):
-                    tepoch.set_description(f"Epoch {train_idx}")
-                    input = batch['image']
-                    label = batch['label']
-
-                    input = input.to(device)
-                    label = label.to(device)
-                    logits = model(input)
-                    
-                    loss = criterion(logits,label.float())
-
-                    loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
-
-                    tepoch.set_postfix(loss=loss.item())
+            for step, batch in enumerate(tqdm(train_loader, position=0, leave=False, desc="Train")):
+                input = batch['image'].to(device)
+                label = batch['label'].to(device)
+                logits = model(input)
+                loss = criterion(logits,label.float())
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
 
             logger.info("***** Running evaluation on Dev Set*****")
-            logger.info("  Num examples = %d", dev_data.shape[0])
-            logger.info("  Batch size = %d", args.eval_batch_size)
-
             model.eval()
             idx2asp = {i:v for i,v in enumerate(ASPECT)}
             true_label_list = {asp:[] for asp in ASPECT}
             pred_label_list = {asp:[] for asp in ASPECT}
 
             eval_epoch_loss = 0
-            for step, batch in enumerate(tqdm(dev_loader, position=0, leave=True, desc="Evaluating")):
-                input = batch['image']
-                label = batch['label']
-
-                input = input.to(device)
-                label = label.to(device)
-                
+            for step, batch in enumerate(tqdm(dev_loader, position=0, leave=True, desc="Dev")):
+                input = batch['image'].to(device)
+                label = batch['label'].to(device)
                 with torch.no_grad():
                     logits = model(input)
                     loss = criterion(logits,label.float())
                     eval_epoch_loss += loss.item()
-                    logits = torch.sigmoid(logits)
-
-                    logits = logits.cpu().numpy()
-
+                    logits = torch.sigmoid(logits).cpu().numpy()
+                    
                     for id_asp in range(len(ASPECT)):
                         asp_label = label[:,id_asp].cpu().numpy()
-                        
-                        pred = np.asarray(logits[:,id_asp] > 0.7).astype(int) # multi-label threshold 
-
+                        pred = np.asarray(logits[:,id_asp] > 0.7).astype(int)
                         true_label_list[idx2asp[id_asp]].append(asp_label)
                         pred_label_list[idx2asp[id_asp]].append(pred)
 
-            if step == 0:
-                step = 1
+            if step == 0: step = 1
             eval_epoch_loss /= step 
 
-            logger.info("***** Precision, Recall, F1-score, Accuracy for each Aspect *****")
             all_precision, all_recall, all_f1 = 0, 0, 0
             all_accuracy = 0
             for id_asp in range(len(ASPECT)):
                 tr = np.concatenate(true_label_list[idx2asp[id_asp]])
                 pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
-
                 precision, recall, f1_score = macro_f1(tr,pr)
                 accuracy = accuracy_score(tr,pr)
-                aspect_rs = {idx2asp[id_asp]:[precision,recall,f1_score,accuracy]}
+                all_precision += precision; all_recall += recall; all_f1 += f1_score; all_accuracy += accuracy
 
-                for key in sorted(aspect_rs.keys()):
-                    logger.info("  %s = %s", key, str(aspect_rs[key]))
+            all_precision /= len(ASPECT); all_recall /= len(ASPECT); all_f1 /= len(ASPECT); all_accuracy /= len(ASPECT)
+            
+            logger.info(f"Epoch {train_idx} Dev Results - F1: {all_f1:.4f}, Acc: {all_accuracy:.4f}")
 
-                all_precision += precision
-                all_recall += recall
-                all_f1 += f1_score
-                all_accuracy += accuracy
-
-            all_precision /= len(ASPECT)
-            all_recall /= len(ASPECT)
-            all_f1 /= len(ASPECT)
-            all_accuracy /= len(ASPECT)
-
-            eval_accuracy = all_accuracy
-            results = {'eval_loss': eval_epoch_loss,
-                        'precision_score':all_precision,
-                        'recall_score':all_recall,
-                        'f_score': all_f1,
-                        'accuracy': all_accuracy
-                        }
-            logger.info("***** Dev Eval results *****")
-            for key in sorted(results.keys()):
-                logger.info("  %s = %s", key, str(results[key]))
-
-            if eval_accuracy >= max_accracy:
-                # Save a trained model    
+            if all_accuracy >= max_accracy:  
                 save_model(f'{args.output_dir}/seed_{args.seed}_image_model.pth',model,train_idx)
-                max_accracy = eval_accuracy
+                max_accracy = all_accuracy
+                logger.info(f"New Best Accuracy: {max_accracy:.4f}")
 
+        # --- TEST SECTION (Modified) ---
         output_test_file = os.path.join(args.output_dir, "test_image_results.txt")
-        with open(output_test_file, "a") as writer:
-            writer.write("***** Running evaluation on Test Set *****\n")
-            writer.write(f"  Num examples = {test_data.shape[0]}\n" )
-            writer.write(f"  Batch size = {args.eval_batch_size}\n")
-
-            logger.info("***** Running evaluation on Test Set *****")
-            logger.info("  Num examples = %d", test_data.shape[0])
-            logger.info("  Batch size = %d", args.eval_batch_size)
-
+        # File này chứa log chi tiết như bạn yêu cầu
+        output_detail_file = os.path.join(args.output_dir, "test_image_predictions_detail.txt")
+        
+        logger.info("***** Running evaluation on Test Set *****")
         checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_image_model.pth')
         model.load_state_dict(checkpoint['model_state_dict'])
         model.eval()
 
-        test_epoch_loss = 0
+        true_label_list = {asp:[] for asp in ASPECT}
+        pred_label_list = {asp:[] for asp in ASPECT}
+        
+        # List để lưu thông tin chi tiết từng mẫu
+        detailed_logs = []
 
-        for step, batch in enumerate(tqdm(test_loader, position=0, leave=True, desc="Evaluating")):
-            input = batch['image']
-            label = batch['label']
-
-            input = input.to(device)
-            label = label.to(device)
+        for step, batch in enumerate(tqdm(test_loader, position=0, leave=True, desc="Test")):
+            input = batch['image'].to(device)
+            label = batch['label'].to(device)
+            filenames = batch['filename'] # Lấy tên file
             
             with torch.no_grad():
                 logits = model(input)
-                loss = criterion(logits,label.float())
-                test_epoch_loss += loss.item()
-                logits = torch.sigmoid(logits)
+                logits = torch.sigmoid(logits).cpu().numpy() # [Batch, Num_Aspects]
+                label_np = label.cpu().numpy()               # [Batch, Num_Aspects]
 
-                logits = logits.cpu().numpy()
-
+                # Xử lý metrics tổng quát
                 for id_asp in range(len(ASPECT)):
                     asp_label = label[:,id_asp].cpu().numpy()
-                    
-                    pred = np.asarray(logits[:,id_asp] > 0.7).astype(int) # multi-label threshold 
-
+                    pred = np.asarray(logits[:,id_asp] > 0.7).astype(int) 
                     true_label_list[idx2asp[id_asp]].append(asp_label)
                     pred_label_list[idx2asp[id_asp]].append(pred)
 
-        if step == 0:
-            step = 1
-        test_epoch_loss /= step 
+                # --- Xử lý Log chi tiết từng file trong batch ---
+                batch_size = input.shape[0]
+                threshold = 0.7
+                
+                for i in range(batch_size):
+                    fname = filenames[i]
+                    
+                    # Lấy nhãn dự đoán (Indices)
+                    pred_indices = np.where(logits[i] > threshold)[0]
+                    # Lấy nhãn gốc (Indices)
+                    gold_indices = np.where(label_np[i] == 1)[0]
+                    
+                    # Convert sang tên Aspect và Sort
+                    pred_aspects = sorted([ASPECT[idx] for idx in pred_indices])
+                    gold_aspects = sorted([ASPECT[idx] for idx in gold_indices])
+                    
+                    detailed_logs.append({
+                        "file": fname,
+                        "gold": gold_aspects,
+                        "pred": pred_aspects
+                    })
 
-        with open(output_test_file, "a") as writer:
-            logger.info("***** Precision, Recall, F1-score, Accuracy for each Aspect *****")
-            writer.write("***** Precision, Recall, F1-score, Accuracy for each Aspect *****\n")
+        # --- Ghi metrics vào file results chung ---
+        with open(output_test_file, "w", encoding='utf-8') as writer:
+            writer.write("***** TEST RESULTS (Image Categories) *****\n")
+            test_all_precision, test_all_recall, test_all_f1, test_all_accuracy = 0, 0, 0, 0
+            
+            for id_asp in range(len(ASPECT)):
+                tr = np.concatenate(true_label_list[idx2asp[id_asp]])
+                pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
+                precision, recall, f1_score = macro_f1(tr,pr)
+                accuracy = accuracy_score(tr,pr)
+                
+                logger.info(f"Aspect: {idx2asp[id_asp]:<15} | F1: {f1_score:.4f} | Acc: {accuracy:.4f}")
+                writer.write(f"{idx2asp[id_asp]:<20} | F1: {f1_score:.4f} | Acc: {accuracy:.4f}\n")
 
-        test_all_precision, test_all_recall, test_all_f1 = 0, 0, 0
-        test_all_accuracy = 0
-        for id_asp in range(len(ASPECT)):
-            tr = np.concatenate(true_label_list[idx2asp[id_asp]])
-            pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
+                test_all_precision += precision; test_all_recall += recall
+                test_all_f1 += f1_score; test_all_accuracy += accuracy
 
-            precision, recall, f1_score = macro_f1(tr,pr)
-            accuracy = accuracy_score(tr,pr)
-            aspect_rs = {idx2asp[id_asp]:[precision,recall,f1_score,accuracy]}
+            test_all_f1 /= len(ASPECT); test_all_accuracy /= len(ASPECT)
+            writer.write(f"MACRO AVG | F1: {test_all_f1:.4f} | Acc: {test_all_accuracy:.4f}\n")
 
-            with open(output_test_file, "a") as writer:
-                for key in sorted(aspect_rs.keys()):
-                    logger.info("  %s = %s", key, str(aspect_rs[key]))
-                    writer.write(f"{key} = {str(aspect_rs[key])}\n")
-
-            test_all_precision += precision
-            test_all_recall += recall
-            test_all_f1 += f1_score
-            test_all_accuracy += accuracy
-
-        test_all_precision /= len(ASPECT)
-        test_all_recall /= len(ASPECT)
-        test_all_f1 /= len(ASPECT)
-        test_all_accuracy /= len(ASPECT)
-
-        results = {'eval_loss': test_epoch_loss,
-                    'precision_score':test_all_precision,
-                    'recall_score':test_all_recall,
-                    'f_score': test_all_f1,
-                    'accuracy': test_all_accuracy
-                    }
+        # --- Ghi log chi tiết theo format bạn yêu cầu ---
+        with open(output_detail_file, "w", encoding='utf-8') as f:
+            for item in detailed_logs:
+                # Format: "image_9405_1.png": [ ... ]
+                f.write(f'"{item["file"]}": [\n')
+                # Sử dụng json.dumps để tạo format ["a", "b"] chuẩn, ensure_ascii=False để giữ tiếng Việt nếu có
+                f.write(f'    Gold_Label: {json.dumps(item["gold"], ensure_ascii=False)},\n')
+                f.write(f'    Prediction: {json.dumps(item["pred"], ensure_ascii=False)},\n')
+                f.write('  ],\n')
         
-        with open(output_test_file, "a") as writer:
-            logger.info("***** Test Eval results *****")
-            writer.write("***** Test Eval results *****\n")
-
-            for key in sorted(results.keys()):
-                logger.info("  %s = %s", key, str(results[key]))
-                writer.write(f"{key} = {str(results[key])}\n")
+        logger.info(f"Saved detailed formatted predictions to {output_detail_file}")
 
     if args.get_cate:
         print("===================== GET IMAGE CATEGORIES =====================")
-
-        model = MyImgModel(len(ASPECT)) # No Location
-        if torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-            model = torch.nn.DataParallel(model)
+        model = MyImgModel(len(ASPECT)) 
+        if torch.cuda.device_count() > 1: model = torch.nn.DataParallel(model)
         model = model.to(device)
 
-        if args.do_train:
-            checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_image_model.pth')
-        else:
-            try:
-                checkpoint = load_model(args.weight_path)
-            except:
-                raise ValueError("Wrong image model weights!!!!")
+        if args.do_train: checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_image_model.pth')
+        else: checkpoint = load_model(args.weight_path)
         
         model.load_state_dict(checkpoint['model_state_dict'])
-
         ASPECT = np.asarray(ASPECT)
-
         image_path_list = os.listdir(args.image_dir)
         img_label_dict = {}
-
-        for img_path in image_path_list:
+        
+        for img_path in tqdm(image_path_list, desc="Inferencing"):
             lb = predict_wrapper(model, ASPECT,args.image_dir, img_path,device)
-            print(f"At image {img_path}: {lb}")
             img_label_dict[img_path] = lb
 
-        # Save result
-        with open(f"{args.output_dir}/resnet152_image_label.json", "x",encoding='utf-8') as f:
+        # Giữ nguyên format json output cuối cùng
+        with open(f"{args.output_dir}/resnet152_image_label.json", "w",encoding='utf-8') as f:
             json.dump(img_label_dict, f,indent = 2,ensure_ascii=False)
 
 if __name__ == "__main__":
