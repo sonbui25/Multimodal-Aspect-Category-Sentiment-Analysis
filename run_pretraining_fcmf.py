@@ -258,7 +258,7 @@ def main():
                         enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                    NONE_SAMPLE_WEIGHT = 0.05
+                    NONE_SAMPLE_WEIGHT = 0.1
                     total_loss = 0
                     
                     for id_asp in range(6):
