@@ -17,8 +17,8 @@ from torchvision.models import resnet152,ResNet152_Weights,resnet50, ResNet50_We
 import random
 import logging
 import sys
+from collections import defaultdict
 
-# --- MODIFIED: Thêm filename vào return của Dataset ---
 class ImageDataset(Dataset):
     def __init__(self, data,root_dir):
         self.image_label = data
@@ -30,7 +30,7 @@ class ImageDataset(Dataset):
         
         image = torchvision.io.read_image(os.path.join(self.root_dir,image_name),mode = torchvision.io.ImageReadMode.RGB)
 
-        label = torch.from_numpy(self.image_label.iloc[index,2:].values.astype(int)) # no location
+        label = torch.from_numpy(self.image_label.iloc[index,2:].values.astype(int)) 
 
         transforms = v2.Compose([
                             v2.Resize((224,224),antialias=True),
@@ -45,7 +45,7 @@ class ImageDataset(Dataset):
         return {
             "image": image,
             "label": label,
-            "filename": image_name # <--- Added this
+            "filename": image_name 
         }
     
 class MyImgModel(torch.nn.Module):
@@ -76,14 +76,12 @@ def macro_f1(y_true, y_pred):
 
 def convert_img_to_tensor(root_dir, img_path):
     image = torchvision.io.read_image(os.path.join(root_dir,img_path),mode = torchvision.io.ImageReadMode.RGB)
-
     transforms = v2.Compose([
                         v2.Resize((224,224),antialias=True),
                         v2.ConvertImageDtype(torch.float32),
                         v2.Normalize((0.485, 0.456, 0.406),
                                                 (0.229, 0.224, 0.225))
                                     ])
-
     image = transforms(image)
     return image
 
@@ -94,7 +92,6 @@ def predict_wrapper(model, list_aspect, root_dir, img_path,device):
     pred = pred > 0.45 
     pred = pred.cpu().numpy().astype(int)
     pred = np.where(pred==1)[0]
-    
     return list(list_aspect[pred])
     
 def main():
@@ -117,7 +114,6 @@ def main():
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir, exist_ok=True)
-        print(f"Created output directory: {args.output_dir}")
 
     log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
     logging.basicConfig(
@@ -164,8 +160,6 @@ def main():
         dev_loader = DataLoader(dev_set,batch_size=args.eval_batch_size,shuffle = False)
         test_loader = DataLoader(test_set,batch_size=args.eval_batch_size,shuffle = False)
 
-        num_train_steps = len(train_loader)*args.num_train_epochs
-
         model = MyImgModel(len(ASPECT)) 
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
@@ -177,7 +171,6 @@ def main():
 
         logger.info("*************** Running training ***************")
         for train_idx in trange(int(args.num_train_epochs), desc="Epoch"):
-            # ... (Training Loop Code omitted for brevity - no changes needed) ...
             model.train()
             for step, batch in enumerate(tqdm(train_loader, position=0, leave=False, desc="Train")):
                 input = batch['image'].to(device)
@@ -194,14 +187,11 @@ def main():
             true_label_list = {asp:[] for asp in ASPECT}
             pred_label_list = {asp:[] for asp in ASPECT}
 
-            eval_epoch_loss = 0
             for step, batch in enumerate(tqdm(dev_loader, position=0, leave=True, desc="Dev")):
                 input = batch['image'].to(device)
                 label = batch['label'].to(device)
                 with torch.no_grad():
                     logits = model(input)
-                    loss = criterion(logits,label.float())
-                    eval_epoch_loss += loss.item()
                     logits = torch.sigmoid(logits).cpu().numpy()
                     
                     for id_asp in range(len(ASPECT)):
@@ -209,9 +199,6 @@ def main():
                         pred = np.asarray(logits[:,id_asp] > 0.7).astype(int)
                         true_label_list[idx2asp[id_asp]].append(asp_label)
                         pred_label_list[idx2asp[id_asp]].append(pred)
-
-            if step == 0: step = 1
-            eval_epoch_loss /= step 
 
             all_precision, all_recall, all_f1 = 0, 0, 0
             all_accuracy = 0
@@ -222,18 +209,15 @@ def main():
                 accuracy = accuracy_score(tr,pr)
                 all_precision += precision; all_recall += recall; all_f1 += f1_score; all_accuracy += accuracy
 
-            all_precision /= len(ASPECT); all_recall /= len(ASPECT); all_f1 /= len(ASPECT); all_accuracy /= len(ASPECT)
+            all_accuracy /= len(ASPECT)
             
-            logger.info(f"Epoch {train_idx} Dev Results - F1: {all_f1:.4f}, Acc: {all_accuracy:.4f}")
-
             if all_accuracy >= max_accracy:  
                 save_model(f'{args.output_dir}/seed_{args.seed}_image_model.pth',model,train_idx)
                 max_accracy = all_accuracy
                 logger.info(f"New Best Accuracy: {max_accracy:.4f}")
 
-        # --- TEST SECTION (Modified) ---
+        # --- TEST SECTION (FIXED ORDER & FORMAT) ---
         output_test_file = os.path.join(args.output_dir, "test_image_results.txt")
-        # File này chứa log chi tiết như bạn yêu cầu
         output_detail_file = os.path.join(args.output_dir, "test_image_predictions_detail.txt")
         
         logger.info("***** Running evaluation on Test Set *****")
@@ -244,79 +228,74 @@ def main():
         true_label_list = {asp:[] for asp in ASPECT}
         pred_label_list = {asp:[] for asp in ASPECT}
         
-        # List để lưu thông tin chi tiết từng mẫu
-        detailed_logs = []
+        # Dùng set để gom nhóm aspect unique (phòng trường hợp 1 ảnh bị lặp dòng)
+        results_map = defaultdict(lambda: {"gold": set(), "pred": set()})
 
         for step, batch in enumerate(tqdm(test_loader, position=0, leave=True, desc="Test")):
             input = batch['image'].to(device)
             label = batch['label'].to(device)
-            filenames = batch['filename'] # Lấy tên file
+            filenames = batch['filename']
             
             with torch.no_grad():
                 logits = model(input)
-                logits = torch.sigmoid(logits).cpu().numpy() # [Batch, Num_Aspects]
-                label_np = label.cpu().numpy()               # [Batch, Num_Aspects]
+                logits = torch.sigmoid(logits).cpu().numpy() 
+                label_np = label.cpu().numpy()               
 
-                # Xử lý metrics tổng quát
+                # Metric calculation standard logic
                 for id_asp in range(len(ASPECT)):
                     asp_label = label[:,id_asp].cpu().numpy()
                     pred = np.asarray(logits[:,id_asp] > 0.7).astype(int) 
                     true_label_list[idx2asp[id_asp]].append(asp_label)
                     pred_label_list[idx2asp[id_asp]].append(pred)
 
-                # --- Xử lý Log chi tiết từng file trong batch ---
+                # --- Aggregation Logic ---
                 batch_size = input.shape[0]
                 threshold = 0.7
                 
                 for i in range(batch_size):
                     fname = filenames[i]
-                    
-                    # Lấy nhãn dự đoán (Indices)
                     pred_indices = np.where(logits[i] > threshold)[0]
-                    # Lấy nhãn gốc (Indices)
                     gold_indices = np.where(label_np[i] == 1)[0]
                     
-                    # Convert sang tên Aspect và Sort
-                    pred_aspects = sorted([ASPECT[idx] for idx in pred_indices])
-                    gold_aspects = sorted([ASPECT[idx] for idx in gold_indices])
+                    pred_aspects = [ASPECT[idx] for idx in pred_indices]
+                    gold_aspects = [ASPECT[idx] for idx in gold_indices]
                     
-                    detailed_logs.append({
-                        "file": fname,
-                        "gold": gold_aspects,
-                        "pred": pred_aspects
-                    })
+                    results_map[fname]["gold"].update(gold_aspects)
+                    results_map[fname]["pred"].update(pred_aspects)
 
-        # --- Ghi metrics vào file results chung ---
+        # Ghi Metrics chung
         with open(output_test_file, "w", encoding='utf-8') as writer:
             writer.write("***** TEST RESULTS (Image Categories) *****\n")
-            test_all_precision, test_all_recall, test_all_f1, test_all_accuracy = 0, 0, 0, 0
-            
+            test_all_f1, test_all_accuracy = 0, 0
             for id_asp in range(len(ASPECT)):
                 tr = np.concatenate(true_label_list[idx2asp[id_asp]])
                 pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
                 precision, recall, f1_score = macro_f1(tr,pr)
                 accuracy = accuracy_score(tr,pr)
-                
-                logger.info(f"Aspect: {idx2asp[id_asp]:<15} | F1: {f1_score:.4f} | Acc: {accuracy:.4f}")
                 writer.write(f"{idx2asp[id_asp]:<20} | F1: {f1_score:.4f} | Acc: {accuracy:.4f}\n")
-
-                test_all_precision += precision; test_all_recall += recall
                 test_all_f1 += f1_score; test_all_accuracy += accuracy
 
             test_all_f1 /= len(ASPECT); test_all_accuracy /= len(ASPECT)
             writer.write(f"MACRO AVG | F1: {test_all_f1:.4f} | Acc: {test_all_accuracy:.4f}\n")
 
-        # --- Ghi log chi tiết theo format bạn yêu cầu ---
-        with open(output_detail_file, "w", encoding='utf-8') as f:
-            for item in detailed_logs:
-                # Format: "image_9405_1.png": [ ... ]
-                f.write(f'"{item["file"]}": [\n')
-                # Sử dụng json.dumps để tạo format ["a", "b"] chuẩn, ensure_ascii=False để giữ tiếng Việt nếu có
-                f.write(f'    Gold_Label: {json.dumps(item["gold"], ensure_ascii=False)},\n')
-                f.write(f'    Prediction: {json.dumps(item["pred"], ensure_ascii=False)},\n')
-                f.write('  ],\n')
+        # Ghi Detailed Log (Duyệt theo thứ tự UNIQUE trong dataframe gốc)
+        test_ordered_files = test_data['file_name'].unique()
         
-        logger.info(f"Saved detailed formatted predictions to {output_detail_file}")
+        with open(output_detail_file, "w", encoding='utf-8') as f:
+            for fname in test_ordered_files:
+                if fname in results_map:
+                    content = results_map[fname]
+                    # Sort để aspect 1 luôn đứng trước aspect 2
+                    sorted_gold = sorted(list(content["gold"]))
+                    sorted_pred = sorted(list(content["pred"]))
+                    
+                    # Format chính xác như yêu cầu
+                    f.write(f'"{fname}": [\n')
+                    f.write(f'    Gold_Label: {json.dumps(sorted_gold, ensure_ascii=False)},\n')
+                    f.write(f'    Prediction: {json.dumps(sorted_pred, ensure_ascii=False)},\n')
+                    f.write('  ],\n')
+        
+        logger.info(f"Saved detailed predictions (Quantity: {len(test_ordered_files)}) to {output_detail_file}")
 
     if args.get_cate:
         print("===================== GET IMAGE CATEGORIES =====================")
@@ -336,7 +315,6 @@ def main():
             lb = predict_wrapper(model, ASPECT,args.image_dir, img_path,device)
             img_label_dict[img_path] = lb
 
-        # Giữ nguyên format json output cuối cùng
         with open(f"{args.output_dir}/resnet152_image_label.json", "w",encoding='utf-8') as f:
             json.dump(img_label_dict, f,indent = 2,ensure_ascii=False)
 

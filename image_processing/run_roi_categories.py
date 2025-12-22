@@ -17,8 +17,8 @@ from torchvision.models import resnet152,ResNet152_Weights,resnet50, ResNet50_We
 import random
 import logging
 import sys
+from collections import defaultdict
 
-# --- MODIFIED: Thêm filename vào return của Dataset ---
 class RoiDataset(Dataset):
     def __init__(self, data, root_dir, ASPECT):
         self.image_label = data
@@ -49,7 +49,7 @@ class RoiDataset(Dataset):
         return {
             "image": image,
             "label": num_lb,
-            "filename": image_name # <--- Added this
+            "filename": image_name 
         }
         
 class MyRoIModel(torch.nn.Module):
@@ -108,7 +108,6 @@ def main():
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir, exist_ok=True)
-        print(f"Created output directory: {args.output_dir}")
 
     log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
     logging.basicConfig(
@@ -151,8 +150,6 @@ def main():
         dev_loader = DataLoader(dev_set,batch_size=args.eval_batch_size,shuffle = False)
         test_loader = DataLoader(test_set,batch_size=args.eval_batch_size,shuffle = False)
 
-        num_train_steps = len(train_loader)*args.num_train_epochs
-
         model = MyRoIModel(len(ASPECT)) 
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
@@ -164,7 +161,6 @@ def main():
 
         logger.info("*************** Running training ***************")
         for train_idx in trange(int(args.num_train_epochs), desc="Epoch"):
-            # ... Training loop ...
             model.train()
             for step, batch in enumerate(tqdm(train_loader, position=0, leave=False, desc="Train")):
                 input = batch['image'].to(device)
@@ -177,8 +173,6 @@ def main():
 
             logger.info("***** Running evaluation on Dev Set*****")
             model.eval()
-            idx2asp = {i:v for i,v in enumerate(ASPECT)}
-            eval_epoch_loss = 0
             all_truth = []
             all_pred = []
             
@@ -187,30 +181,22 @@ def main():
                 label = batch['label'].to(device)
                 with torch.no_grad():
                     logits = model(input)
-                    loss = criterion(logits,label)
-                    eval_epoch_loss += loss.item()
                     logits = logits.cpu().numpy()
                     pred = np.argmax(logits, axis = -1)
                     all_pred.extend(pred.tolist())
                     all_truth.extend(label.cpu().numpy().tolist())
 
-            if step == 0: step = 1
-            eval_epoch_loss /= step 
-            
             all_precision, all_recall, all_f1 = macro_f1(all_truth, all_pred)
-            all_f1_mean = all_f1.mean()
             matrix = confusion_matrix(all_truth, all_pred,labels = [i for i in range(len(ASPECT))])
             all_accuracy = matrix.diagonal()/matrix.sum(axis=1)
             all_accuracy = np.where(np.isnan(all_accuracy), 0, all_accuracy).mean()
-
-            logger.info(f"Epoch {train_idx} Dev Results - F1: {all_f1_mean:.4f}, Acc: {all_accuracy:.4f}")
 
             if all_accuracy >= max_accracy:   
                 save_model(f'{args.output_dir}/seed_{args.seed}_roi_model.pth',model,train_idx)
                 max_accracy = all_accuracy
                 logger.info(f"New Best Accuracy: {max_accracy:.4f}")
 
-        # --- TEST SECTION (Modified) ---
+        # --- TEST SECTION (FIXED ORDER & FORMAT) ---
         output_test_file = os.path.join(args.output_dir, "test_roi_results.txt")
         output_detail_file = os.path.join(args.output_dir, "test_roi_predictions_detail.txt")
         
@@ -221,43 +207,35 @@ def main():
 
         test_all_truth = []
         test_all_pred = []
-        detailed_logs = []
+        
+        # Gom nhóm kết quả
+        results_map = defaultdict(lambda: {"gold": [], "pred": []})
 
         for step, batch in enumerate(tqdm(test_loader, position=0, leave=True, desc="Test")):
             input = batch['image'].to(device)
             label = batch['label'].to(device)
-            filenames = batch['filename'] # Lấy tên file
+            filenames = batch['filename']
 
             with torch.no_grad():
                 logits = model(input)
                 logits_np = logits.cpu().numpy()
                 pred_batch = np.argmax(logits_np, axis = -1)
-                
                 label_np = label.cpu().numpy()
 
                 test_all_pred.extend(pred_batch.tolist())
                 test_all_truth.extend(label_np.tolist())
 
-                # --- Xử lý Log chi tiết ---
+                # --- Aggregation Logic ---
                 batch_size = input.shape[0]
                 for i in range(batch_size):
                     fname = filenames[i]
-                    # ROI chỉ có 1 nhãn duy nhất (Single Label Classification)
-                    # Nhưng để đúng format bạn yêu cầu (danh sách), ta bọc nó vào list []
                     pred_name = ASPECT[pred_batch[i]]
                     gold_name = ASPECT[label_np[i]]
                     
-                    # Sort list (chỉ có 1 phần tử nên ko thay đổi gì, nhưng giữ logic code)
-                    pred_list = sorted([pred_name])
-                    gold_list = sorted([gold_name])
-                    
-                    detailed_logs.append({
-                        "file": fname,
-                        "gold": gold_list,
-                        "pred": pred_list
-                    })
+                    results_map[fname]["gold"].append(gold_name)
+                    results_map[fname]["pred"].append(pred_name)
 
-        # --- Ghi metrics ---
+        # Ghi Metrics chung
         with open(output_test_file, "w") as writer:
             writer.write("***** TEST RESULTS (ROI Categories) *****\n")
             test_all_precision, test_all_recall, test_all_f1 = macro_f1(test_all_truth, test_all_pred)
@@ -266,18 +244,26 @@ def main():
             test_all_accuracy = np.where(np.isnan(test_all_accuracy), 0, test_all_accuracy)
 
             for id_asp in range(len(ASPECT)):
-                logger.info(f"Aspect: {idx2asp[id_asp]:<15} | F1: {test_all_f1[id_asp]:.4f} | Acc: {test_all_accuracy[id_asp]:.4f}")
-                writer.write(f"{idx2asp[id_asp]:<20} | F1: {test_all_f1[id_asp]:.4f} | Acc: {test_all_accuracy[id_asp]:.4f}\n")
+                writer.write(f"{ASPECT[id_asp]:<20} | F1: {test_all_f1[id_asp]:.4f} | Acc: {test_all_accuracy[id_asp]:.4f}\n")
         
-        # --- Ghi log chi tiết theo format ---
-        with open(output_detail_file, "w", encoding='utf-8') as f:
-            for item in detailed_logs:
-                f.write(f'"{item["file"]}": [\n')
-                f.write(f'    Gold_Label: {json.dumps(item["gold"], ensure_ascii=False)},\n')
-                f.write(f'    Prediction: {json.dumps(item["pred"], ensure_ascii=False)},\n')
-                f.write('  ],\n')
+        # Ghi Detailed Log (Duyệt theo thứ tự UNIQUE trong dataframe gốc)
+        test_ordered_files = test_data['file_name'].unique()
 
-        logger.info(f"Saved detailed formatted predictions to {output_detail_file}")
+        with open(output_detail_file, "w", encoding='utf-8') as f:
+            for fname in test_ordered_files:
+                if fname in results_map:
+                    content = results_map[fname]
+                    # Sort để aspect 1 luôn đứng trước aspect 2
+                    sorted_gold = sorted(content["gold"])
+                    sorted_pred = sorted(content["pred"])
+                    
+                    # Format chính xác như yêu cầu
+                    f.write(f'"{fname}": [\n')
+                    f.write(f'    Gold_Label: {json.dumps(sorted_gold, ensure_ascii=False)},\n')
+                    f.write(f'    Prediction: {json.dumps(sorted_pred, ensure_ascii=False)},\n')
+                    f.write('  ],\n')
+
+        logger.info(f"Saved detailed predictions (Quantity: {len(test_ordered_files)}) to {output_detail_file}")
 
     if args.get_cate:
         print("===================== GET ROI CATEGORIES =====================")
