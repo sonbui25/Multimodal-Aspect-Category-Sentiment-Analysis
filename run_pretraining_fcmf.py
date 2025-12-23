@@ -243,65 +243,52 @@ def main():
             optimizer.zero_grad()
             
             pbar = tqdm(train_loader, disable=not master_process)
+            # ... (Trong vòng lặp epoch)
             for step, batch in enumerate(pbar):
                 pbar.set_description(f"Epoch {epoch}")
                 
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
-                (t_img_f, roi_img_f, roi_coors, all_labels, all_dec_ids, all_dec_mask, 
-                 all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _, _) = batch 
+                
+                # UNPACK MỚI (Flattened)
+                (t_img_f, roi_img_f, roi_coors, 
+                 labels, dec_input_ids, 
+                 enc_ids, enc_type, enc_mask, add_mask) = batch 
                 
                 roi_img_f = roi_img_f.float()
 
                 with torch.amp.autocast('cuda', enabled=args.fp16):
+                    # Visual Extraction (Giữ nguyên)
                     with torch.no_grad():
-                        enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
-                        vis_embeds = torch.stack(enc_imgs, dim=1)
-                        enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
-                        roi_embeds = torch.stack(enc_rois, dim=1)
+                         enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
+                         vis_embeds = torch.stack(enc_imgs, dim=1)
+                         enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
+                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                    NONE_SAMPLE_WEIGHT = args.none_sample_weight
-                    total_loss = 0
+                    # --- LOGIC TRAIN MỚI (KHÔNG CÒN FOR LOOP 6 ASPECT) ---
+                    # Model Forward trực tiếp
+                    logits = model(
+                        enc_X=enc_ids, 
+                        dec_X=dec_input_ids, 
+                        visual_embeds_att=vis_embeds, 
+                        roi_embeds_att=roi_embeds, 
+                        roi_coors=roi_coors,
+                        token_type_ids=enc_type, 
+                        attention_mask=enc_mask, 
+                        added_attention_mask=add_mask, 
+                        is_train=True
+                    )
                     
-                    for id_asp in range(6):
-                        enc_ids = all_enc_ids[:, id_asp, :]
-                        enc_type = all_enc_type[:, id_asp, :]
-                        enc_mask = all_enc_mask[:, id_asp, :]
-                        add_mask = all_add_mask[:, id_asp, :]
-                        
-                        dec_ids = all_dec_ids[:, id_asp, :]
-                        labels = all_labels[:, id_asp, :]
-
-                        lbl_ids = labels.detach().cpu().numpy()
-                        lbl_ids = np.where(lbl_ids != -100, lbl_ids, tokenizer.pad_token_id)
-                        decoded_texts = tokenizer.batch_decode(lbl_ids, skip_special_tokens=True)
-                        
-                        batch_sample_weights = []
-                        for txt in decoded_texts:
-                            clean_txt = txt.lower().strip()
-                            if "none" in clean_txt or clean_txt == "":
-                                batch_sample_weights.append(NONE_SAMPLE_WEIGHT)
-                            else:
-                                batch_sample_weights.append(1.0)
-                        
-                        sample_weights = torch.tensor(batch_sample_weights, device=device) 
-
-                        logits = model(enc_X=enc_ids, dec_X=dec_ids, 
-                                    visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds, roi_coors=roi_coors,
-                                    token_type_ids=enc_type, attention_mask=enc_mask, added_attention_mask=add_mask, is_train=True)
-                        
-                        loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
-                        loss_per_token = loss_fct(logits.permute(0, 2, 1), labels) 
-                        loss_per_sample = loss_per_token.sum(dim=1) 
-                        weighted_loss = loss_per_sample * sample_weights
-                        loss_asp = weighted_loss.mean() 
-                        total_loss += loss_asp
-
+                    # Tính Loss (Bỏ qua padding -100)
+                    loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                    # Logits: [Batch, Dec_Len, Vocab] -> Permute: [Batch, Vocab, Dec_Len]
+                    total_loss = loss_fct(logits.permute(0, 2, 1), labels)
+                    
                 if args.gradient_accumulation_steps > 1:
                     total_loss = total_loss / args.gradient_accumulation_steps
 
                 if args.fp16: scaler.scale(total_loss).backward()
                 else: total_loss.backward()
-
+                
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     if args.fp16: scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -439,8 +426,9 @@ def main():
             for batch in tqdm(test_loader, desc="Test with Beam Search"):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                 
-                (t_img_f, roi_img_f, roi_coors, all_dec_lbls, _, _, 
-                 all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _, batch_texts) = batch
+                (t_img_f, roi_img_f, roi_coors, 
+                labels, dec_input_ids, 
+                enc_ids, enc_type, enc_mask, add_mask, _, _) = batch
 
                 enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                 vis_embeds = torch.stack(enc_imgs, dim=1)
@@ -491,41 +479,82 @@ def main():
         
         log_path = f"{args.output_dir}/iaog_test_predictions_formatted.txt"
         with open(log_path, "w", encoding="utf-8") as f:
+            # --- PHẦN 1: METRICS (Giữ nguyên logic tính toán) ---
             f.write(f"TEST METRICS (BERTScore with {args.bert_score_model}):\n")
             f.write("-" * 50 + "\n")
             
-            for asp in ASPECT_LIST:
-                P, R, F1 = score(test_preds[asp], test_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
-                
-                asp_P = P.mean().item()
-                asp_R = R.mean().item()
-                asp_F1 = F1.mean().item()
-                
-                test_total_P += asp_P
-                test_total_R += asp_R
-                test_total_F1 += asp_F1
-                
-                line = f"{asp:<15} | P: {asp_P:.4f} | R: {asp_R:.4f} | F1: {asp_F1:.4f}\n"
-                logger.info(line.strip())
-                f.write(line)
+            test_total_P = 0
+            test_total_R = 0
+            test_total_F1 = 0
+            count_valid = 0 # Đếm số aspect thực sự có dữ liệu
             
-            avg_rP = test_total_P / len(ASPECT_LIST)
-            avg_rR = test_total_R / len(ASPECT_LIST)
-            avg_rF1 = test_total_F1 / len(ASPECT_LIST)
+            for asp in ASPECT_LIST:
+                # [QUAN TRỌNG] Chỉ tính điểm nếu aspect đó có dữ liệu trong tập test
+                if len(test_preds[asp]) > 0:
+                    P, R, F1 = score(test_preds[asp], test_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
+                    
+                    asp_P = P.mean().item()
+                    asp_R = R.mean().item()
+                    asp_F1 = F1.mean().item()
+                    
+                    test_total_P += asp_P
+                    test_total_R += asp_R
+                    test_total_F1 += asp_F1
+                    count_valid += 1
+                    
+                    line = f"{asp:<15} | P: {asp_P:.4f} | R: {asp_R:.4f} | F1: {asp_F1:.4f}\n"
+                    logger.info(line.strip())
+                    f.write(line)
+                else:
+                    # Nếu aspect này không xuất hiện trong tập test (do đã lọc Positive-Only)
+                    f.write(f"{asp:<15} | (No positive samples)\n")
+            
+            # Tính trung bình (Tránh chia cho 0 hoặc chia cho aspect rỗng)
+            if count_valid > 0:
+                avg_rP = test_total_P / count_valid
+                avg_rR = test_total_R / count_valid
+                avg_rF1 = test_total_F1 / count_valid
+            else:
+                avg_rP = avg_rR = avg_rF1 = 0.0
 
             f.write("-" * 50 + "\n")
             f.write(f"MACRO AVERAGE   | P: {avg_rP:.4f} | R: {avg_rR:.4f} | F1: {avg_rF1:.4f}\n")
             f.write("="*50 + "\n\n")
             
+            # --- PHẦN 2: DETAILED LOGS (ĐÃ CHỈNH SỬA THEO YÊU CẦU) ---
+            f.write("DETAILED PREDICTIONS (Filtered View):\n")
+            
             for i, sample in enumerate(all_test_results):
-                f.write("{\n")
-                f.write(f"Sentence {i}: {sample['text']}\n")
+                # 1. Tạo buffer để chứa các dòng text của các aspect hợp lệ
+                sample_buffer = []
+                has_content = False
+                
+                header = f"Sentence {i}: {sample['text']}\n"
+                
                 for asp in ASPECT_LIST:
-                    res = sample['aspects'].get(asp, {'predict': 'N/A', 'label': 'N/A'})
-                    f.write(f"{asp}:\n")
-                    f.write(f"   predict: {res['predict']}\n")
-                    f.write(f"   label:   {res['label']}\n")
-                f.write("}\n")
+                    res = sample['aspects'].get(asp, {'predict': 'none', 'label': 'none'})
+                    pred = str(res['predict']).strip()
+                    label = str(res['label']).strip()
+                    
+                    # LOGIC LỌC:
+                    # Kiểm tra xem predict và label có phải là 'none' hoặc rỗng không
+                    is_pred_none = (pred.lower() == 'none' or pred == '')
+                    is_label_none = (label.lower() == 'none' or label == '')
+                    
+                    # Chỉ in nếu ÍT NHẤT MỘT TRONG HAI có dữ liệu (NOT both are none)
+                    if not (is_pred_none and is_label_none):
+                        sample_buffer.append(f"{asp}:\n")
+                        sample_buffer.append(f"   predict: {pred}\n")
+                        sample_buffer.append(f"   label:   {label}\n")
+                        has_content = True
+                
+                # 2. Chỉ ghi vào file nếu câu này có ít nhất 1 aspect có thông tin
+                if has_content:
+                    f.write("{\n")
+                    f.write(header)
+                    for line in sample_buffer:
+                        f.write(line)
+                    f.write("}\n")
         
         logger.info(f"***** TEST RESULTS (Macro Avg) *****")
         logger.info(f"Test Precision: {avg_rP:.4f}") 
