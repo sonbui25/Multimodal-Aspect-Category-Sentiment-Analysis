@@ -251,7 +251,7 @@ def main():
                 # UNPACK MỚI (Flattened)
                 (t_img_f, roi_img_f, roi_coors, 
                  labels, dec_input_ids, 
-                 enc_ids, enc_type, enc_mask, add_mask) = batch 
+                 enc_ids, enc_type, enc_mask, add_mask, _, _) = batch 
                 
                 roi_img_f = roi_img_f.float()
 
