@@ -308,8 +308,11 @@ def main():
                 with torch.no_grad():
                     for batch in tqdm(dev_loader, desc="Eval Beam", leave=False):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
-                        (t_img_f, roi_img_f, roi_coors, all_labels, all_dec_ids, _, 
-                         all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, _, _) = batch
+                        
+                        (t_img_f, roi_img_f, roi_coors, 
+                         all_labels, dec_input_ids, 
+                         all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
+                         batch_aspect_names, batch_texts) = batch
                         
                         enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                         vis_embeds = torch.stack(enc_imgs, dim=1)
