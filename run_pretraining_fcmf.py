@@ -391,125 +391,129 @@ def main():
         try:
             test_data = pd.read_json(f'{args.pretrained_data_dir}/test_with_iaog.json')
             test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+            # Batch size có thể tăng lên vì không còn stack 6 aspect
             test_loader = DataLoader(IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder), batch_size=args.eval_batch_size)
         except: return
 
         ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
-        # ckpt_path = f'/kaggle/input/iaog-bert-score/pytorch/30_epoch/4/seed_42_iaog_model_best.pth'
         if os.path.exists(ckpt_path):
+            logger.info(f"Loading Best Checkpoint for Testing: {ckpt_path}")
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
             else: model.load_state_dict(ckpt['model_state_dict'])
             
-            # Load ResNet Image
+            # Load ResNet (Giữ nguyên logic load)
             resimg_path = ckpt_path.replace("iaog_model", "resimg_model")
             if os.path.exists(resimg_path):
-                resimg_ckpt = torch.load(resimg_path, map_location=device, weights_only=False)
                 unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
-                unwrap_resimg.load_state_dict(resimg_ckpt['model_state_dict'])
+                unwrap_resimg.load_state_dict(torch.load(resimg_path, map_location=device, weights_only=False)['model_state_dict'])
             
-            # Load ResNet RoI
             resroi_path = ckpt_path.replace("iaog_model", "resroi_model")
             if os.path.exists(resroi_path):
-                resroi_ckpt = torch.load(resroi_path, map_location=device, weights_only=False)
                 unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
-                unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
-                model.eval(); resnet_img.eval(); resnet_roi.eval()
+                unwrap_resroi.load_state_dict(torch.load(resroi_path, map_location=device, weights_only=False)['model_state_dict'])
+                
+            model.eval(); resnet_img.eval(); resnet_roi.eval()
                 
         all_test_results = []
         
-        # --- CHANGED: Storage for BERTScore (Test) ---
+        # Storage for BERTScore
         test_preds = {asp: [] for asp in ASPECT_LIST}
         test_refs = {asp: [] for asp in ASPECT_LIST}
         
+        # Dictionary tạm để gom nhóm kết quả theo câu (cho phần Logging)
+        # Key: sentence_text -> Value: {Aspect: {predict, label}}
+        temp_results_by_text = {} 
+
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Test with Beam Search"):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                 
+                # [FIX 1] Unpack đúng tên biến và lấy đủ 11 phần tử
                 (t_img_f, roi_img_f, roi_coors, 
-                labels, dec_input_ids, 
-                enc_ids, enc_type, enc_mask, add_mask, _, _) = batch
+                 all_dec_lbls, dec_input_ids,  # Đổi tên labels -> all_dec_lbls
+                 all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
+                 batch_aspect_names, batch_texts) = batch # Lấy aspect name và text
 
+                # Feature Extraction
                 enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                 vis_embeds = torch.stack(enc_imgs, dim=1)
                 enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                 roi_embeds = torch.stack(enc_rois, dim=1)
 
-                batch_results = [{"text": t, "aspects": {}} for t in batch_texts]
                 batch_size = all_enc_ids.shape[0]
-
-                for id_asp in range(6):
-                    aspect_name = ASPECT_LIST[id_asp]
-                    decoded_preds = []
-
-                    for i in range(batch_size):
-                        pred_text = beam_search(
-                            model=model,
-                            tokenizer=tokenizer,
-                            enc_ids=all_enc_ids[i, id_asp],
-                            enc_mask=all_enc_mask[i, id_asp],
-                            enc_type=all_enc_type[i, id_asp],
-                            add_mask=all_add_mask[i, id_asp],
-                            vis_embeds=vis_embeds[i],
-                            roi_embeds=roi_embeds[i],
-                            roi_coors=roi_coors[i],
-                            beam_size=args.beam_size,
-                            max_len=args.max_len_decoder,
-                            device=device
-                        )[0]
-                        decoded_preds.append(pred_text)
-
-                    lbls = all_dec_lbls[:,id_asp].cpu().numpy()
-                    lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
-                    decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
-                    
-                    for i, (p, g) in enumerate(zip(decoded_preds, decoded_lbls)):
-                        if p.startswith("n ") and len(p) > 2: p = p[2:]
-                        
-                        test_preds[aspect_name].append(p)
-                        test_refs[aspect_name].append(g)
-                        
-                        batch_results[i]["aspects"][aspect_name] = {"predict": p, "label": g}
                 
-                all_test_results.extend(batch_results)
+                # [FIX 2] XÓA VÒNG LẶP ASPECT (range 6). Duyệt theo Batch Size.
+                for i in range(batch_size):
+                    # Lấy thông tin của mẫu hiện tại
+                    aspect_name = batch_aspect_names[i]
+                    text_content = batch_texts[i]
+                    
+                    # Beam Search cho mẫu i
+                    pred_text = beam_search(
+                        model=model,
+                        tokenizer=tokenizer,
+                        enc_ids=all_enc_ids[i],     # [Seq_Len] (đã flatten)
+                        enc_mask=all_enc_mask[i],
+                        enc_type=all_enc_type[i],
+                        add_mask=all_add_mask[i],
+                        vis_embeds=vis_embeds[i],
+                        roi_embeds=roi_embeds[i],
+                        roi_coors=roi_coors[i],
+                        beam_size=args.beam_size,
+                        max_len=args.max_len_decoder,
+                        device=device
+                    )[0]
+                    
+                    # Decode Label cho mẫu i
+                    lbl = all_dec_lbls[i].cpu().numpy()
+                    lbl = lbl[lbl != -100] # Bỏ padding
+                    label_text = tokenizer.decode(lbl, skip_special_tokens=True)
+
+                    # Xử lý string
+                    if pred_text.startswith("n ") and len(pred_text) > 2: pred_text = pred_text[2:]
+                    
+                    # 1. Lưu vào list để tính Metrics
+                    test_preds[aspect_name].append(pred_text)
+                    test_refs[aspect_name].append(label_text)
+                    
+                    # 2. Gom nhóm theo câu để chuẩn bị Logging
+                    if text_content not in temp_results_by_text:
+                        temp_results_by_text[text_content] = {'text': text_content, 'aspects': {}}
+                    
+                    temp_results_by_text[text_content]['aspects'][aspect_name] = {
+                        "predict": pred_text, 
+                        "label": label_text
+                    }
+
+        # Chuyển đổi từ dict sang list cho format cũ
+        all_test_results = list(temp_results_by_text.values())
 
         logger.info(f"Computing BERTScore for Test Set using model: {args.bert_score_model} ...")
         
-        test_total_P, test_total_R, test_total_F1 = 0, 0, 0
-        
         log_path = f"{args.output_dir}/iaog_test_predictions_formatted.txt"
         with open(log_path, "w", encoding="utf-8") as f:
-            # --- PHẦN 1: METRICS (Giữ nguyên logic tính toán) ---
+            # --- PHẦN 1: METRICS ---
             f.write(f"TEST METRICS (BERTScore with {args.bert_score_model}):\n")
             f.write("-" * 50 + "\n")
             
-            test_total_P = 0
-            test_total_R = 0
-            test_total_F1 = 0
-            count_valid = 0 # Đếm số aspect thực sự có dữ liệu
+            test_total_P = 0; test_total_R = 0; test_total_F1 = 0
+            count_valid = 0 
             
             for asp in ASPECT_LIST:
-                # [QUAN TRỌNG] Chỉ tính điểm nếu aspect đó có dữ liệu trong tập test
                 if len(test_preds[asp]) > 0:
                     P, R, F1 = score(test_preds[asp], test_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
                     
-                    asp_P = P.mean().item()
-                    asp_R = R.mean().item()
-                    asp_F1 = F1.mean().item()
-                    
-                    test_total_P += asp_P
-                    test_total_R += asp_R
-                    test_total_F1 += asp_F1
+                    asp_P = P.mean().item(); asp_R = R.mean().item(); asp_F1 = F1.mean().item()
+                    test_total_P += asp_P; test_total_R += asp_R; test_total_F1 += asp_F1
                     count_valid += 1
                     
                     line = f"{asp:<15} | P: {asp_P:.4f} | R: {asp_R:.4f} | F1: {asp_F1:.4f}\n"
                     logger.info(line.strip())
                     f.write(line)
                 else:
-                    # Nếu aspect này không xuất hiện trong tập test (do đã lọc Positive-Only)
                     f.write(f"{asp:<15} | (No positive samples)\n")
             
-            # Tính trung bình (Tránh chia cho 0 hoặc chia cho aspect rỗng)
             if count_valid > 0:
                 avg_rP = test_total_P / count_valid
                 avg_rR = test_total_R / count_valid
@@ -521,11 +525,10 @@ def main():
             f.write(f"MACRO AVERAGE   | P: {avg_rP:.4f} | R: {avg_rR:.4f} | F1: {avg_rF1:.4f}\n")
             f.write("="*50 + "\n\n")
             
-            # --- PHẦN 2: DETAILED LOGS (ĐÃ CHỈNH SỬA THEO YÊU CẦU) ---
+            # --- PHẦN 2: DETAILED LOGS (ĐÃ CHỈNH SỬA) ---
             f.write("DETAILED PREDICTIONS (Filtered View):\n")
             
             for i, sample in enumerate(all_test_results):
-                # 1. Tạo buffer để chứa các dòng text của các aspect hợp lệ
                 sample_buffer = []
                 has_content = False
                 
@@ -536,24 +539,20 @@ def main():
                     pred = str(res['predict']).strip()
                     label = str(res['label']).strip()
                     
-                    # LOGIC LỌC:
-                    # Kiểm tra xem predict và label có phải là 'none' hoặc rỗng không
+                    # LOGIC LỌC: Ẩn nếu CẢ hai đều là none hoặc rỗng
                     is_pred_none = (pred.lower() == 'none' or pred == '')
                     is_label_none = (label.lower() == 'none' or label == '')
                     
-                    # Chỉ in nếu ÍT NHẤT MỘT TRONG HAI có dữ liệu (NOT both are none)
                     if not (is_pred_none and is_label_none):
                         sample_buffer.append(f"{asp}:\n")
                         sample_buffer.append(f"   predict: {pred}\n")
                         sample_buffer.append(f"   label:   {label}\n")
                         has_content = True
                 
-                # 2. Chỉ ghi vào file nếu câu này có ít nhất 1 aspect có thông tin
                 if has_content:
                     f.write("{\n")
                     f.write(header)
-                    for line in sample_buffer:
-                        f.write(line)
+                    for line in sample_buffer: f.write(line)
                     f.write("}\n")
         
         logger.info(f"***** TEST RESULTS (Macro Avg) *****")
