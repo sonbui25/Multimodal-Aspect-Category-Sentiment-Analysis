@@ -64,7 +64,6 @@ def main():
     parser.add_argument('--fine_tune_cnn', action='store_true')
     parser.add_argument("--alpha", default=0.8, type=float)
     parser.add_argument("--beam_size", default=2, type=int)
-    parser.add_argument("--none_sample_weight", default=0.5, type=float)
 
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
