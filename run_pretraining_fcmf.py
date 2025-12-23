@@ -251,7 +251,7 @@ def main():
                 # UNPACK MỚI (Flattened)
                 (t_img_f, roi_img_f, roi_coors, 
                  labels, dec_input_ids, 
-                 enc_ids, enc_type, enc_mask, add_mask, _, _) = batch 
+                 enc_ids, enc_type, enc_mask, add_mask, _, _) = batch
                 
                 roi_img_f = roi_img_f.float()
 
@@ -301,7 +301,6 @@ def main():
                 logger.info("***** Running evaluation on Dev Set with BEAM SEARCH *****")
                 model.eval(); resnet_img.eval(); resnet_roi.eval()
                 
-                # --- LOGIC TƯƠNG TỰ RUN_MULTIMODAL: Lưu theo Dictionary ---
                 val_preds = {asp: [] for asp in ASPECT_LIST}
                 val_refs = {asp: [] for asp in ASPECT_LIST}
                 
@@ -309,72 +308,59 @@ def main():
                     for batch in tqdm(dev_loader, desc="Eval Beam", leave=False):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                         
+                        # [FIX] Unpack đủ 11 biến
                         (t_img_f, roi_img_f, roi_coors, 
                          all_labels, dec_input_ids, 
                          all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
                          batch_aspect_names, batch_texts) = batch
                         
+                        # Feature Extraction
                         enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                         vis_embeds = torch.stack(enc_imgs, dim=1)
                         enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                        for id_asp in range(6):
-                            aspect_name = ASPECT_LIST[id_asp]
-                            batch_size = all_enc_ids.shape[0]
-                            decoded_preds = []
+                        # [FIX] Loop qua Batch Size (KHÔNG CÒN loop 6 aspect)
+                        batch_size = all_enc_ids.shape[0]
+                        for i in range(batch_size):
+                            aspect_name = batch_aspect_names[i]
                             
-                            for i in range(batch_size):
-                                pred = beam_search(
-                                    model=model,
-                                    tokenizer=tokenizer,
-                                    enc_ids=all_enc_ids[i, id_asp],
-                                    enc_mask=all_enc_mask[i, id_asp],
-                                    enc_type=all_enc_type[i, id_asp],
-                                    add_mask=all_add_mask[i, id_asp],
-                                    vis_embeds=vis_embeds[i],
-                                    roi_embeds=roi_embeds[i],
-                                    roi_coors=roi_coors[i],
-                                    beam_size=args.beam_size,
-                                    max_len=args.max_len_decoder,
-                                    device=device
-                                )[0]
-                                decoded_preds.append(pred)
-
-                            lbls = all_labels[:,id_asp].cpu().numpy()
+                            pred_text = beam_search(
+                                model=model, tokenizer=tokenizer,
+                                enc_ids=all_enc_ids[i],     # [Seq_Len]
+                                enc_mask=all_enc_mask[i],
+                                enc_type=all_enc_type[i],
+                                add_mask=all_add_mask[i],
+                                vis_embeds=vis_embeds[i],
+                                roi_embeds=roi_embeds[i],
+                                roi_coors=roi_coors[i],
+                                beam_size=args.beam_size,
+                                max_len=args.max_len_decoder,
+                                device=device
+                            )[0]
+                            
+                            # Decode Label
+                            lbls = all_labels[i].cpu().numpy()
                             lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
-                            decoded_lbls = tokenizer.batch_decode(lbls, skip_special_tokens=True)
+                            decoded_lbl = tokenizer.decode(lbls, skip_special_tokens=True)
+                            if pred_text.startswith("n ") and len(pred_text) > 2: pred_text = pred_text[2:]
                             
-                            for p_text, g_text in zip(decoded_preds, decoded_lbls):
-                                if p_text.startswith("n ") and len(p_text) > 2: p_text = p_text[2:]
-                                
-                                val_preds[aspect_name].append(p_text)
-                                val_refs[aspect_name].append(g_text)
+                            val_preds[aspect_name].append(pred_text)
+                            val_refs[aspect_name].append(decoded_lbl)
 
                 logger.info(f"Computing BERTScore for Dev Set using model: {args.bert_score_model} ...")
-                logger.info("***** BERTScore Per Aspect *****")
-                
                 total_P, total_R, total_F1 = 0, 0, 0
+                count_valid = 0
                 
-                # --- LOGIC TƯƠNG TỰ RUN_MULTIMODAL: Tính Score từng Aspect rồi cộng dồn ---
                 for asp in ASPECT_LIST:
-                    P, R, F1 = score(val_preds[asp], val_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
-                    
-                    asp_P = P.mean().item()
-                    asp_R = R.mean().item()
-                    asp_F1 = F1.mean().item()
-                    
-                    logger.info(f"  Aspect: {asp:<15} | P: {asp_P:.4f} | R: {asp_R:.4f} | F1: {asp_F1:.4f}")
-                    
-                    total_P += asp_P
-                    total_R += asp_R
-                    total_F1 += asp_F1
+                    if len(val_preds[asp]) > 0:
+                        P, R, F1 = score(val_preds[asp], val_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
+                        p, r, f1 = P.mean().item(), R.mean().item(), F1.mean().item()
+                        total_P += p; total_R += r; total_F1 += f1; count_valid += 1
+                        logger.info(f"  Aspect: {asp:<15} | P: {p:.4f} | R: {r:.4f} | F1: {f1:.4f}")
                 
-                avg_val_P = total_P / len(ASPECT_LIST)
-                avg_val_R = total_R / len(ASPECT_LIST)
-                avg_val_F1 = total_F1 / len(ASPECT_LIST)
-                
-                logger.info(f"Epoch {epoch} [Macro-Avg] | P: {avg_val_P:.4f} | R: {avg_val_R:.4f} | F1: {avg_val_F1:.4f}")
+                avg_val_F1 = total_F1 / count_valid if count_valid > 0 else 0
+                logger.info(f"Epoch {epoch} [Macro-Avg] F1: {avg_val_F1:.4f}")
 
                 if avg_val_F1 > max_f1_score:
                     max_f1_score = avg_val_F1
@@ -393,7 +379,6 @@ def main():
         try:
             test_data = pd.read_json(f'{args.pretrained_data_dir}/test_with_iaog.json')
             test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
-            # Batch size có thể tăng lên vì không còn stack 6 aspect
             test_loader = DataLoader(IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder), batch_size=args.eval_batch_size)
         except: return
 

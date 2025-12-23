@@ -8,10 +8,6 @@ import pandas as pd
 
 class IAOGDataset(Dataset):
     def __init__(self, data, tokenizer, img_folder, roi_df, dict_image_aspect, dict_roi_aspect, num_img=7, num_roi=4, max_len_decoder=20):
-        """
-        Dataset cho bài toán IAOG (Implicit Aspect-Opinion Generation).
-        Phiên bản Positive-Only: Chỉ giữ lại các cặp (Câu, Aspect) có nhãn thực tế.
-        """
         self.data = data
         self.tokenizer = tokenizer
         self.img_folder = img_folder
@@ -31,7 +27,7 @@ class IAOGDataset(Dataset):
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
         ])
 
-        # --- LOGIC MỚI: FLATTEN DỮ LIỆU (Lọc bỏ hoàn toàn None) ---
+        # --- LOGIC MỚI: FLATTEN DỮ LIỆU ---
         self.samples = []
         for idx, row in self.data.iterrows():
             iaog_labels_raw = row.get('iaog_labels', [])
@@ -39,23 +35,20 @@ class IAOGDataset(Dataset):
             if not isinstance(iaog_labels_raw, list) or len(iaog_labels_raw) == 0:
                 continue
 
-            # Gom nhóm từ cảm xúc theo Aspect
+            # 1. Gom nhóm từ cảm xúc theo Aspect
             aspect_group = {}
             for label_str in iaog_labels_raw:
                 if '#' not in label_str: continue
                 parts = label_str.split('#')
                 sentiment_word = parts[0].strip()
                 aspect_name = parts[1].strip()
-                
-                if aspect_name == "Public_area": aspect_name = "Public_area" # Chuẩn hóa tên nếu cần
+                if aspect_name == "Public_area": aspect_name = "Public_area"
 
                 if aspect_name in self.aspect2id:
-                    if aspect_name not in aspect_group:
-                        aspect_group[aspect_name] = []
-                    if sentiment_word not in aspect_group[aspect_name]:
-                        aspect_group[aspect_name].append(sentiment_word)
+                    if aspect_name not in aspect_group: aspect_group[aspect_name] = []
+                    if sentiment_word not in aspect_group[aspect_name]: aspect_group[aspect_name].append(sentiment_word)
             
-            # Chỉ tạo mẫu cho aspect CÓ DỮ LIỆU (Positive Only)
+            # 2. Tạo mẫu training riêng biệt cho từng Aspect
             for aspect, words in aspect_group.items():
                 target_string = " , ".join(sorted(words))
                 self.samples.append({
@@ -101,38 +94,29 @@ class IAOGDataset(Dataset):
         labels[-1] = -100
         labels[labels == self.tokenizer.pad_token_id] = -100
 
+        # TRẢ VỀ 11 PHẦN TỬ
         return (
             t_img_features, roi_img_features, roi_coors, 
             labels, dec_input_ids, enc_ids, enc_type, enc_mask, added_mask,
-            target_aspect, # [NEW] Trả về tên aspect để logging
-            text           # [NEW] Trả về text gốc để gom nhóm logging
+            target_aspect, text
         )
 
-    # --- HELPER FUNCTIONS (Giữ nguyên) ---
     def _get_visual_tags(self, list_img_path):
         l_img, l_roi = [], []
         if list_img_path is None: list_img_path = []
         for img in list_img_path[:self.num_img]:
-            try: l_img.extend(self.dict_image_aspect.get(img, []))
-            except: pass
-            try: l_roi.extend(self.dict_roi_aspect.get(img, []))
+            try: l_img.extend(self.dict_image_aspect.get(img, [])); l_roi.extend(self.dict_roi_aspect.get(img, []))
             except: pass
         return list(set(l_img) or ['empty']), list(set(l_roi) or ['empty'])
 
     def _process_images(self, list_img_path):
-        list_img_features = []
-        global_roi_features = []
-        global_roi_coor = []
+        list_img_features, global_roi_features, global_roi_coor = [], [], []
         if list_img_path is None: list_img_path = []
-        
         for img_path in list_img_path[:self.num_img]:
-            image_os_path = os.path.join(self.img_folder, img_path)
             try:
-                one_image = read_image(image_os_path, mode=ImageReadMode.RGB)
+                one_image = read_image(os.path.join(self.img_folder, img_path), mode=ImageReadMode.RGB)
                 img_transform = self.transform(one_image).unsqueeze(0)
-            except:
-                img_transform = torch.zeros(1, 3, 224, 224)
-                one_image = torch.zeros(3, 224, 224)
+            except: img_transform = torch.zeros(1, 3, 224, 224); one_image = torch.zeros(3, 224, 224)
             list_img_features.append(img_transform)
             
             list_roi_img, list_roi_coor = [], []
@@ -140,39 +124,29 @@ class IAOGDataset(Dataset):
             except: roi_in_img_df = pd.DataFrame()
             
             if roi_in_img_df.shape[0] == 0:
-                global_roi_coor.append(np.zeros((self.num_roi, 4)))
-                global_roi_features.append(np.zeros((self.num_roi, 3, 224, 224)))
+                global_roi_coor.append(np.zeros((self.num_roi, 4))); global_roi_features.append(np.zeros((self.num_roi, 3, 224, 224)))
                 continue
 
             for i_roi in range(roi_in_img_df.shape[0]):
                 x1, x2, y1, y2 = roi_in_img_df.iloc[i_roi, 1:5].values
                 max_h, max_w = one_image.shape[1], one_image.shape[2]
-                x1, x2 = max(0, int(x1)), min(max_h, int(x2))
-                y1, y2 = max(0, int(y1)), min(max_w, int(y2))
+                x1, x2 = max(0, int(x1)), min(max_h, int(x2)); y1, y2 = max(0, int(y1)), min(max_w, int(y2))
                 roi_in_image = one_image[:, x1:x2, y1:y2]
-                if roi_in_image.numel() == 0: roi_transform = torch.zeros(3, 224, 224).numpy()
-                else: roi_transform = self.transform(roi_in_image).numpy()
-                
+                roi_transform = self.transform(roi_in_image).numpy() if roi_in_image.numel() > 0 else torch.zeros(3, 224, 224).numpy()
                 x1, x2, y1, y2 = x1/512, x2/512, y1/512, y2/512
                 cv = lambda x: np.clip([x], 0.0, 1.0)[0]
-                list_roi_coor.append([cv(x1), cv(x2), cv(y1), cv(y2)])
-                list_roi_img.append(roi_transform)
+                list_roi_coor.append([cv(x1), cv(x2), cv(y1), cv(y2)]); list_roi_img.append(roi_transform)
 
             if len(list_roi_img) < self.num_roi:
-                 for k in range(self.num_roi - len(list_roi_img)):
-                    list_roi_img.append(np.zeros((3, 224, 224)))
-                    list_roi_coor.append(np.zeros((4,)))
-            global_roi_features.append(np.asarray(list_roi_img))
-            global_roi_coor.append(np.asarray(list_roi_coor))
+                 for k in range(self.num_roi - len(list_roi_img)): list_roi_img.append(np.zeros((3, 224, 224))); list_roi_coor.append(np.zeros((4,)))
+            global_roi_features.append(np.asarray(list_roi_img)); global_roi_coor.append(np.asarray(list_roi_coor))
 
         t_img = torch.zeros(self.num_img, 3, 224, 224)
         for i in range(min(len(list_img_features), self.num_img)): t_img[i, :] = list_img_features[i]
-        
         roi_img = torch.zeros(self.num_img, self.num_roi, 3, 224, 224)
         roi_coor = torch.zeros(self.num_img, self.num_roi, 4)
         global_roi_features = np.array(global_roi_features) 
         if len(global_roi_features) > 0 and len(global_roi_features.shape) > 1:
              for i in range(min(len(global_roi_features), self.num_img)):
-                roi_img[i, :] = torch.tensor(global_roi_features[i])
-                roi_coor[i, :] = torch.tensor(global_roi_coor[i])
+                roi_img[i, :] = torch.tensor(global_roi_features[i]); roi_coor[i, :] = torch.tensor(global_roi_coor[i])
         return t_img, roi_img, roi_coor
