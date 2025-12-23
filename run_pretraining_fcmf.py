@@ -49,7 +49,7 @@ def main():
     parser.add_argument("--output_dir", default=None, type=str, required=True)
     parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True)
     
-    # Argument cho BERTScore (như chỉnh sửa của bạn)
+    # Argument cho BERTScore
     parser.add_argument('--bert_score_model', default='uitnlp/visobert', type=str, 
                         help="HuggingFace model name or local path for BERTScore")
     
@@ -64,7 +64,8 @@ def main():
     parser.add_argument('--fine_tune_cnn', action='store_true')
     parser.add_argument("--alpha", default=0.8, type=float)
     parser.add_argument("--beam_size", default=2, type=int)
-    
+    parser.add_argument("--none_sample_weight", default=0.5, type=float)
+
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
     parser.add_argument("--train_batch_size", default=8, type=int)
@@ -258,7 +259,7 @@ def main():
                         enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                    NONE_SAMPLE_WEIGHT = 0.1
+                    NONE_SAMPLE_WEIGHT = args.none_sample_weight
                     total_loss = 0
                     
                     for id_asp in range(6):
