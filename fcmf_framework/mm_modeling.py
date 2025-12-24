@@ -573,31 +573,36 @@ class TransformerDecoderBlock(nn.Module):
         self.addnorm2 = AddNorm(HIDDEN_SIZE, ATTENTION_PROBS_DROPOUT_PROB)
         self.ffn = PositionWiseFFN(HIDDEN_SIZE, HIDDEN_SIZE)
         self.add_norm3 = AddNorm(HIDDEN_SIZE, ATTENTION_PROBS_DROPOUT_PROB)
-    def forward(self, X, state, is_train=True):
+    def forward(self, X, state, enc_attention_mask=None, is_train=True):
         enc_outputs, enc_valid_lens = state[0], state[1]
+        
+        # ... (Phần Self-Attention giữ nguyên) ...
         if state[2][self.i] is None:
             key_values = X
         else:
             key_values = torch.cat((state[2][self.i], X), dim=1)
             state[2][self.i] = key_values
+            
         if is_train:
             batch_size, num_steps, _ = X.shape
-            # Shape of dec_valid_lens: (batch_size, num_steps)
-            dec_valid_lens = torch.arange(1, num_steps + 1, device=X.device).repeat(batch_size, 1) # In training, no mask 
-            '''
-            For example: if num_steps = 5
-           [[1, 2, 3, 4, 5],  # Batch 1
-            [1, 2, 3, 4, 5],  # Batch 2
-            ...]              # Batch N
-            Model can see all the positions in the current sequence
-            '''
+            dec_valid_lens = torch.arange(1, num_steps + 1, device=X.device).repeat(batch_size, 1)
         else:
-            dec_valid_lens = None # In prediction, masking is done in the attention module
+            dec_valid_lens = None
+
         # Self-attention
         X2, _ = self.attention1(X, X, dec_valid_lens)
         Y = self.addnorm1(X, X2)
-        # Encoder-decoder attention
-        Y2, _ = self.attention2(enc_outputs, Y, enc_valid_lens)
+        
+        # Encoder-decoder attention (Cross-Attention)
+        # [QUAN TRỌNG] Ưu tiên dùng enc_attention_mask nếu có.
+        # Nếu không (fallback), dùng enc_valid_lens cũ.
+        cross_mask = enc_attention_mask if enc_attention_mask is not None else enc_valid_lens
+        
+        # Y là Query (Decoder), enc_outputs là Key/Value (Encoder)
+        # Lưu ý: Code gốc của bạn đang gọi: self.attention2(enc_outputs, Y, ...)
+        # Điều này có nghĩa là tham số đầu là Key, tham số hai là Query.
+        Y2, _ = self.attention2(enc_outputs, Y, cross_mask)
+        
         Z = self.addnorm2(Y, Y2)
         return self.add_norm3(Z, self.ffn(Z)), state
     
@@ -634,17 +639,25 @@ class IAOGDecoder(nn.Module):
     def init_state(self, enc_outputs, enc_valid_lens):
         return [enc_outputs, enc_valid_lens, [None] * self.num_blks]
 
-    def forward(self, X, state, is_train=True):
+    def forward(self, X, state, enc_attention_mask=None, is_train=True):
         X = self.pos_encoding(self.embedding(X) * math.sqrt(self.num_hiddens))
-        # Init storage for weights (nếu cần visualize)
+        
         self._attention_weights = [[None] * len(self.blks) for _ in range (2)]
         
+        # [XỬ LÝ MASK]
+        # Nếu class Attention của bạn dùng masked_softmax cộng trực tiếp (Score + Mask)
+        # Bạn cần đảm bảo enc_attention_mask ở dạng Float (-10000.0/0.0) và đúng chiều (Batch, 1, 1, SrcLen).
+        # Nếu class Attention dùng valid_lens (độ dài), bạn phải sửa class Attention đó trước.
+        # Giả sử ta đã chuẩn bị mask chuẩn dạng Float từ FCMFSeq2Seq.
+        
         for i, blk in enumerate(self.blks):
-            X, state = blk(X, state, is_train=is_train)
-            # [FIX] Truy cập trực tiếp vào .attention_weights thay vì .attention.attention_weights
+            # Truyền mask xuống block
+            X, state = blk(X, state, enc_attention_mask=enc_attention_mask, is_train=is_train)
+            
             self._attention_weights[0][i] = blk.attention1.attention_weights
             self._attention_weights[1][i] = blk.attention2.attention_weights
-        return self.dense(X) #,state
+            
+        return self.dense(X)
 
     @property
     def attention_weights(self):
