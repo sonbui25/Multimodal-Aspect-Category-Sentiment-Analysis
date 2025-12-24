@@ -35,7 +35,8 @@ def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask,
     # 2. CHẠY ENCODER MỘT LẦN DUY NHẤT (Encoder Caching)
     # Thay vì gọi model() lặp lại, ta chỉ encoding 1 lần.
     with torch.no_grad():
-        enc_outputs = model.encoder(
+        # Unpack tuple chỉ lấy hidden states (bỏ qua attentions ở vị trí thứ 2)
+        encoder_results = model.encoder(
             enc_ids, 
             vis_embeds, 
             roi_embeds, 
@@ -44,6 +45,12 @@ def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask,
             enc_mask, 
             add_mask
         )
+        
+        # Kiểm tra nếu kết quả là tuple (do code mới trả về thêm attention)
+        if isinstance(encoder_results, tuple):
+            enc_outputs = encoder_results[0]
+        else:
+            enc_outputs = encoder_results
     
     # 3. Khởi tạo Beam
     # [QUAN TRỌNG]: Dùng đúng token bắt đầu là <iaog> thay vì cls_token
@@ -305,7 +312,7 @@ class FCMFEncoder(nn.Module):
 
     def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors=None, token_type_ids=None, attention_mask=None, added_attention_mask=None):
         # 1. Text Encoding
-        sequence_output, pooled_output = self.bert(input_ids, token_type_ids, attention_mask)
+        sequence_output, pooled_output, enc_attentions = self.bert(input_ids, token_type_ids, attention_mask)
         seq_len = sequence_output.size()[1]
 
         list_h_i = []
@@ -430,7 +437,7 @@ class FCMFEncoder(nn.Module):
         # Trả về chuỗi token đầy đủ (không lấy [-1] nữa nếu muốn Decoder nhìn thấy hết)
         # Nếu self.mm_attention là BertEncoder (nhiều lớp), nó trả về list các layer.
         # Ta lấy layer cuối cùng:
-        return final_multimodal_encoder[-1]
+        return final_multimodal_encoder[-1], enc_attentions
 class FCMFSeq2Seq(nn.Module):
     def __init__(self, vocab_size, max_len_decoder, pretrained_hf_path, num_imgs, num_roi, alpha):
         super(FCMFSeq2Seq, self).__init__()
@@ -453,7 +460,7 @@ class FCMFSeq2Seq(nn.Module):
         self.decoder.dense.weight = self.decoder.embedding.weight
 
     def forward(self, enc_X, dec_X, visual_embeds_att, roi_embeds_att, roi_coors=None, token_type_ids=None, attention_mask=None, added_attention_mask=None, source_valid_len=None, is_train=True):
-        enc_output = self.encoder(
+        enc_output, enc_attentions = self.encoder(
             enc_X, 
             visual_embeds_att, 
             roi_embeds_att, 
@@ -489,7 +496,8 @@ class FCMFSeq2Seq(nn.Module):
         logits = self.decoder(dec_X, 
                               dec_state, 
                               is_train=is_train)
-        
+        if not is_train:
+            return logits, enc_attentions
         return logits
 
     def _init_weights(self, module):

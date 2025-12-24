@@ -431,11 +431,12 @@ class FeatureExtractor(torch.nn.Module): #ok
                                           local_files_only=True)
 
   def forward(self, input_ids, token_type_ids, attention_mask):
-    seq_out, pooled_out = self.cell(input_ids = input_ids,
+    seq_out, pooled_out, enc_attentions = self.cell(input_ids = input_ids,
                                     token_type_ids = token_type_ids, 
-                                    attention_mask = attention_mask )[:2]
+                                    attention_mask = attention_mask,
+                                    output_attentions=True)[:3]
 
-    return seq_out, pooled_out
+    return seq_out, pooled_out, enc_attentions
 
 class MultimodalDenoisingEncoder(nn.Module):
     def __init__(self, alpha=0.7): 

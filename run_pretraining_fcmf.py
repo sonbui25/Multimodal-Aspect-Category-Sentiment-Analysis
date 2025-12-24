@@ -22,7 +22,7 @@ import json
 from torch.cuda.amp import autocast 
 import os
 from rouge_score import rouge_scorer
-from bert_score import score
+# from bert_score import score # Đã comment lại vì chuyển sang dùng ROUGE
 
 def save_model(path, model, optimizer, scheduler, epoch, best_score, scaler=None):
     if hasattr(model, 'module'): model_state = model.module.state_dict()
@@ -49,9 +49,9 @@ def main():
     parser.add_argument("--output_dir", default=None, type=str, required=True)
     parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True)
     
-    # Argument cho BERTScore
+    # Argument cho BERTScore (Vẫn giữ để tránh lỗi nếu script gọi truyền vào, nhưng không dùng tính toán nữa)
     parser.add_argument('--bert_score_model', default='uitnlp/visobert', type=str, 
-                        help="HuggingFace model name or local path for BERTScore")
+                        help="HuggingFace model name or local path for BERTScore (Not used for metric anymore)")
     
     parser.add_argument('--image_dir', default='../vimacsa/image')
     parser.add_argument('--resnet_label_path', default='/kaggle/input/resnet-output')
@@ -178,7 +178,7 @@ def main():
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps*args.warmup_proportion), num_training_steps=num_train_steps)
 
     start_epoch = 0
-    max_f1_score = 0.0 
+    max_rouge_l = 0.0 
 
     # A. RESUME (Pretraining)
     if args.resume_from_checkpoint:
@@ -223,10 +223,10 @@ def main():
             
             # 6. Thiết lập epoch bắt đầu
             start_epoch = ckpt['epoch'] + 1
-            if 'best_score' in ckpt: max_f1_score = ckpt['best_score']
+            if 'best_score' in ckpt: max_rouge_l = ckpt['best_score']
             
             if master_process: 
-                logger.info(f"Resumed at epoch {start_epoch}, Best F1: {max_f1_score}")
+                logger.info(f"Resumed at epoch {start_epoch}, Best ROUGE-L: {max_rouge_l}")
                 # Kiểm tra LR thực tế sau khi load
                 logger.info(f"Current LR after resume: {optimizer.param_groups[0]['lr']:.2e}")
         else:
@@ -348,30 +348,49 @@ def main():
                             val_preds[aspect_name].append(pred_text)
                             val_refs[aspect_name].append(decoded_lbl)
 
-                logger.info(f"Computing BERTScore for Dev Set using model: {args.bert_score_model} ...")
-                total_P, total_R, total_F1 = 0, 0, 0
+                logger.info(f"Computing ROUGE Score for Dev Set ...")
+                scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=False)
+                
+                total_r1, total_r2, total_rl = 0.0, 0.0, 0.0
                 count_valid = 0
                 
                 for asp in ASPECT_LIST:
                     if len(val_preds[asp]) > 0:
-                        P, R, F1 = score(val_preds[asp], val_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
-                        p, r, f1 = P.mean().item(), R.mean().item(), F1.mean().item()
-                        total_P += p; total_R += r; total_F1 += f1; count_valid += 1
-                        logger.info(f"  Aspect: {asp:<15} | P: {p:.4f} | R: {r:.4f} | F1: {f1:.4f}")
+                        asp_r1, asp_r2, asp_rl = 0.0, 0.0, 0.0
+                        preds = val_preds[asp]
+                        refs = val_refs[asp]
+                        
+                        for p, r in zip(preds, refs):
+                            scores = scorer.score(r, p)
+                            asp_r1 += scores['rouge1'].fmeasure
+                            asp_r2 += scores['rouge2'].fmeasure
+                            asp_rl += scores['rougeL'].fmeasure
+                        
+                        n = len(preds)
+                        count_valid += n
+                        
+                        total_r1 += asp_r1
+                        total_r2 += asp_r2
+                        total_rl += asp_rl
+                        
+                        logger.info(f"  Aspect: {asp:<15} | R-1: {asp_r1/n:.4f} | R-2: {asp_r2/n:.4f} | R-L: {asp_rl/n:.4f}")
                 
-                avg_val_F1 = total_F1 / count_valid if count_valid > 0 else 0
-                logger.info(f"Epoch {epoch} [Macro-Avg] F1: {avg_val_F1:.4f}")
+                avg_val_r1 = total_r1 / count_valid if count_valid > 0 else 0
+                avg_val_r2 = total_r2 / count_valid if count_valid > 0 else 0
+                avg_val_rl = total_rl / count_valid if count_valid > 0 else 0
+                
+                logger.info(f"Epoch {epoch} [Macro-Avg] ROUGE-L: {avg_val_rl:.4f}")
 
-                if avg_val_F1 > max_f1_score:
-                    max_f1_score = avg_val_F1
-                    logger.info(f"New Best F1-Score ({max_f1_score:.4f})! Saving model...")
-                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+                if avg_val_rl > max_rouge_l:
+                    max_rouge_l = avg_val_rl
+                    logger.info(f"New Best ROUGE-L ({max_rouge_l:.4f})! Saving model...")
+                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_rouge_l, scaler=scaler)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rouge_l, scaler=scaler)
+                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rouge_l, scaler=scaler)
                     
-                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_rouge_l, scaler=scaler)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_rouge_l, scaler=scaler)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_rouge_l, scaler=scaler)
                 print("\n")
 
     # --- 6. TEST (WITH BEAM SEARCH & FULL ROUGE) ---
@@ -404,7 +423,7 @@ def main():
                 
         all_test_results = []
         
-        # Storage for BERTScore
+        # Storage for ROUGE
         test_preds = {asp: [] for asp in ASPECT_LIST}
         test_refs = {asp: [] for asp in ASPECT_LIST}
         
@@ -476,40 +495,52 @@ def main():
         # Chuyển đổi từ dict sang list cho format cũ
         all_test_results = list(temp_results_by_text.values())
 
-        logger.info(f"Computing BERTScore for Test Set using model: {args.bert_score_model} ...")
+        logger.info(f"Computing ROUGE Score for Test Set ...")
         
         log_path = f"{args.output_dir}/iaog_test_predictions_formatted.txt"
         with open(log_path, "w", encoding="utf-8") as f:
             # --- PHẦN 1: METRICS ---
-            f.write(f"TEST METRICS (BERTScore with {args.bert_score_model}):\n")
+            f.write(f"TEST METRICS (ROUGE-1, ROUGE-2, ROUGE-L):\n")
             f.write("-" * 50 + "\n")
             
-            test_total_P = 0; test_total_R = 0; test_total_F1 = 0
-            count_valid = 0 
+            scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=False)
+            
+            test_total_r1 = 0; test_total_r2 = 0; test_total_rl = 0
+            count_total_samples = 0
             
             for asp in ASPECT_LIST:
                 if len(test_preds[asp]) > 0:
-                    P, R, F1 = score(test_preds[asp], test_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
+                    asp_r1, asp_r2, asp_rl = 0.0, 0.0, 0.0
+                    preds = test_preds[asp]
+                    refs = test_refs[asp]
                     
-                    asp_P = P.mean().item(); asp_R = R.mean().item(); asp_F1 = F1.mean().item()
-                    test_total_P += asp_P; test_total_R += asp_R; test_total_F1 += asp_F1
-                    count_valid += 1
+                    for p, r in zip(preds, refs):
+                        scores = scorer.score(r, p)
+                        asp_r1 += scores['rouge1'].fmeasure
+                        asp_r2 += scores['rouge2'].fmeasure
+                        asp_rl += scores['rougeL'].fmeasure
                     
-                    line = f"{asp:<15} | P: {asp_P:.4f} | R: {asp_R:.4f} | F1: {asp_F1:.4f}\n"
+                    n = len(preds)
+                    count_total_samples += n
+                    test_total_r1 += asp_r1
+                    test_total_r2 += asp_r2
+                    test_total_rl += asp_rl
+                    
+                    line = f"{asp:<15} | R-1: {asp_r1/n:.4f} | R-2: {asp_r2/n:.4f} | R-L: {asp_rl/n:.4f}\n"
                     logger.info(line.strip())
                     f.write(line)
                 else:
                     f.write(f"{asp:<15} | (No positive samples)\n")
             
-            if count_valid > 0:
-                avg_rP = test_total_P / count_valid
-                avg_rR = test_total_R / count_valid
-                avg_rF1 = test_total_F1 / count_valid
+            if count_total_samples > 0:
+                avg_final_r1 = test_total_r1 / count_total_samples
+                avg_final_r2 = test_total_r2 / count_total_samples
+                avg_final_rl = test_total_rl / count_total_samples
             else:
-                avg_rP = avg_rR = avg_rF1 = 0.0
+                avg_final_r1 = avg_final_r2 = avg_final_rl = 0.0
 
             f.write("-" * 50 + "\n")
-            f.write(f"MACRO AVERAGE   | P: {avg_rP:.4f} | R: {avg_rR:.4f} | F1: {avg_rF1:.4f}\n")
+            f.write(f"MACRO AVERAGE   | R-1: {avg_final_r1:.4f} | R-2: {avg_final_r2:.4f} | R-L: {avg_final_rl:.4f}\n")
             f.write("="*50 + "\n\n")
             
             # --- PHẦN 2: DETAILED LOGS (ĐÃ CHỈNH SỬA) ---
@@ -543,9 +574,9 @@ def main():
                     f.write("}\n")
         
         logger.info(f"***** TEST RESULTS (Macro Avg) *****")
-        logger.info(f"Test Precision: {avg_rP:.4f}") 
-        logger.info(f"Test Recall:    {avg_rR:.4f}") 
-        logger.info(f"Test F1-Score:  {avg_rF1:.4f}") 
+        logger.info(f"Test ROUGE-1: {avg_final_r1:.4f}") 
+        logger.info(f"Test ROUGE-2: {avg_final_r2:.4f}") 
+        logger.info(f"Test ROUGE-L: {avg_final_rl:.4f}") 
         logger.info(f"Formatted predictions saved to {log_path}")
 
 if __name__ == '__main__':
