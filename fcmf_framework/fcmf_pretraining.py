@@ -462,9 +462,7 @@ class FCMFSeq2Seq(nn.Module):
             attention_mask, 
             added_attention_mask
         )
-        # dec_state = self.decoder.init_state(enc_output_last_layer, source_valid_len)
-        # logits = self.decoder(dec_X, dec_state, is_train=is_train)
-        # return logits
+        
         # 2. Tái tạo Mask Động để truyền cho Decoder
         # Vì Decoder cần biết trong enc_output chỗ nào là Text Padding
         
@@ -483,10 +481,14 @@ class FCMFSeq2Seq(nn.Module):
         # Combined Mask: [Batch, seq_len + 14]
         combined_mask = torch.cat((text_mask, vis_mask), dim=1)
 
-        # 3. Gọi Decoder với Mask Động
+        # [FIX HERE] Tạo state đủ 3 thành phần: [Encoder_Out, Mask, Cache_List]
+        # Cache_List cần thiết cho TransformerDecoderBlock (state[2])
+        dec_state = [enc_output, combined_mask, [None] * self.decoder.num_blks]
+
+        # 3. Gọi Decoder với state đã sửa
         logits = self.decoder(dec_X, 
-                                (enc_output, combined_mask), 
-                                is_train=is_train)
+                              dec_state, 
+                              is_train=is_train)
         
         return logits
 
