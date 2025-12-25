@@ -87,7 +87,32 @@ def convert_img_to_tensor(img):
                                     ])
     image = transforms(img)
     return image
+def prepare_roi_data_correctly(roi_label_path, seed=18):
+    # 1. Đọc dữ liệu
+    roi_df = pd.read_csv(roi_label_path)
+    print(f"Tổng số lượng ROI: {len(roi_df)}")
     
+    # 2. Lấy danh sách tên file ảnh DUY NHẤT (Unique Image Level)
+    unique_img_ids = roi_df['file_name'].unique()
+    print(f"Tổng số lượng ảnh gốc (Unique Images): {len(unique_img_ids)}")
+    
+    # 3. Chia tập dữ liệu dựa trên DANH SÁCH ẢNH (70% Train, 15% Dev, 15% Test)
+    train_imgs, dev_test_imgs = train_test_split(unique_img_ids, test_size=0.3, random_state=seed)
+    dev_imgs, test_imgs = train_test_split(dev_test_imgs, test_size=0.5, random_state=seed)
+    
+    # 4. Lọc lại DataFrame ROI dựa trên danh sách ảnh đã chia
+    # Đảm bảo: Nếu ảnh A thuộc Train, thì TOÀN BỘ ROI của ảnh A đều nằm trong Train
+    train_data = roi_df[roi_df['file_name'].isin(train_imgs)].reset_index(drop=True)
+    dev_data = roi_df[roi_df['file_name'].isin(dev_imgs)].reset_index(drop=True)
+    test_data = roi_df[roi_df['file_name'].isin(test_imgs)].reset_index(drop=True)
+    
+    print("-" * 30)
+    print(f"Train ROIs: {len(train_data)} (từ {len(train_imgs)} ảnh)")
+    print(f"Dev ROIs:   {len(dev_data)} (từ {len(dev_imgs)} ảnh)")
+    print(f"Test ROIs:  {len(test_data)} (từ {len(test_imgs)} ảnh)")
+    print("-" * 30)
+    
+    return train_data, dev_data, test_data
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image_dir", default='../image', type=str, required=True)
@@ -134,13 +159,11 @@ def main():
     if args.do_train:
         if args.roi_label_path == None: raise ValueError("Please provide annotated RoI file.")
 
-        roi_df = pd.read_csv(f"{args.roi_label_path}")
-        train_data, dev_test_data = train_test_split(roi_df,test_size=0.3,random_state=18)
-        dev_data, test_data = train_test_split(dev_test_data,test_size=0.5,random_state=18)
+        # roi_df = pd.read_csv(f"{args.roi_label_path}")
+        # train_data, dev_test_data = train_test_split(roi_df,test_size=0.3,random_state=18)
+        # dev_data, test_data = train_test_split(dev_test_data,test_size=0.5,random_state=18)
 
-        train_data = train_data.reset_index().drop('index',axis=1)
-        dev_data = dev_data.reset_index().drop('index',axis=1)
-        test_data = test_data.reset_index().drop('index',axis=1)
+        train_data, dev_data, test_data = prepare_roi_data_correctly(args.roi_label_path, seed=18)
 
         train_set = RoiDataset(train_data,args.image_dir,ASPECT)
         dev_set = RoiDataset(dev_data,args.image_dir,ASPECT)

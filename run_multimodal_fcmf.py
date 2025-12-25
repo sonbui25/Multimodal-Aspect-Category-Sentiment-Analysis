@@ -93,6 +93,7 @@ def main():
     
     parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true', help="Whether to run eval on the dev set.")
+    parser.add_argument("--freeze_encoder", action='store_true', help="Freeze the encoder weights during training.")
     
     parser.add_argument("--train_batch_size", default=8, type=int, help="Total batch size for training.")
     parser.add_argument("--eval_batch_size", default=8, type=int, help="Total batch size for eval.")
@@ -227,7 +228,13 @@ def main():
     resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
 
     model = model.to(device)
-
+    if args.freeze_encoder:
+        # Đóng băng toàn bộ tham số của Encoder (bao gồm BERT + Fusion Layers)
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+        
+        if master_process:
+            logger.info("❄️  FCMFEncoder has been FROZEN! Only Classifier Head will be trained.")
     if args.ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
         resnet_img = DDP(resnet_img, device_ids=[ddp_local_rank])
