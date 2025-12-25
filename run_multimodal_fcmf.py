@@ -253,15 +253,19 @@ def main():
     head_names = ['classifier', 'text_pooler'] 
     
     for n, p in model.named_parameters():
+        # [QUAN TRỌNG] Chỉ lấy những tham số nào được phép train (requires_grad=True)
+        if not p.requires_grad:
+            continue
+
         if any(nd in n for nd in head_names):
             head_params.append((n, p))
         else:
             encoder_params.append((n, p))
 
+    # (Phần optimizer_grouped_parameters phía sau giữ nguyên, vì list params giờ đã sạch)
     optimizer_grouped_parameters = [
-        # Encoder Group: Low LR
         {
-            'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)], # For weights
+            'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
             'lr': args.encoder_learning_rate 
         },
