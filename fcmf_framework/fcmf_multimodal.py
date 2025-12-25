@@ -19,7 +19,11 @@ class FCMF(nn.Module):
     def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None):
 
         output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
-        pooled_output = self.text_pooler(output)
+        if isinstance(output, tuple):
+            sequence_output = output[0] # get the last hidden states
+        else:
+            sequence_output = output
+        pooled_output = self.text_pooler(sequence_output)
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output) 
         return logits   
