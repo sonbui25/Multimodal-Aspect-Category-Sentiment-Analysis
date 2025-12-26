@@ -220,9 +220,6 @@ def main():
                  num_roi=args.num_rois,
                  alpha=args.alpha)
     
-    # [IMPORTANT] Resize embedding to match tokenizer
-    model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
-
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
     roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
     resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn, device=device)

@@ -450,11 +450,15 @@ class FCMFSeq2Seq(nn.Module):
         self.encoder.text2img_attention.apply(self._init_weights)
         self.encoder.mm_attention.apply(self._init_weights)
         self.encoder.MultimodalDenoisingEncoder.apply(self._init_weights)
-
-        # --- Weight Tying (Embeddings) ---
-        if hasattr(self.encoder.bert.cell, 'embeddings'):
-             self.decoder.embedding.weight = self.encoder.bert.cell.embeddings.word_embeddings.weight
         
+        # 1. Ép BERT về đúng 15002 (khớp với tokenizer)
+        if hasattr(self.encoder.bert.cell, 'resize_token_embeddings'):
+            self.encoder.bert.cell.resize_token_embeddings(vocab_size) # vocab_size = 15002
+
+        # 2. Bây giờ thực hiện Weight Tying sẽ an toàn vì BERT đã là 15002
+        if hasattr(self.encoder.bert.cell, 'embeddings'):
+            self.decoder.embedding.weight = self.encoder.bert.cell.embeddings.word_embeddings.weight
+
         self.decoder.dense.weight = self.decoder.embedding.weight
 
     def forward(self, enc_X, dec_X, visual_embeds_att, roi_embeds_att, roi_coors=None, token_type_ids=None, attention_mask=None, added_attention_mask=None, source_valid_len=None, is_train=True):
