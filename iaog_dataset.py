@@ -50,7 +50,13 @@ class IAOGDataset(Dataset):
             
             # 2. Tạo mẫu training riêng biệt cho từng Aspect
             for aspect, words in aspect_group.items():
-                target_string = " , ".join(sorted(words))
+                # Chuyển đổi tên Aspect cho tự nhiên (ví dụ Public_area -> Public area)
+                asp_label = "public area" if aspect == "Public_area" else aspect.lower()
+                
+                # CẤU TRÚC MỚI: [Aspect] : [Sentiment1] , [Sentiment2]
+                # Ví dụ: "room : sạch sẽ , đẹp"
+                target_string = f"{asp_label} : {' , '.join(sorted(words))}"
+                
                 self.samples.append({
                     'original_idx': idx,
                     'target_aspect': aspect,
@@ -87,7 +93,7 @@ class IAOGDataset(Dataset):
         added_mask = torch.tensor([1] * (170 + 49))
 
         # 3. DECODER
-        dec_text = f"<iaog> {target_sentiment}".lower()
+        dec_text = f"{target_sentiment}".lower()
         dec = self.tokenizer(dec_text, max_length=self.max_len_decoder, padding='max_length', truncation=True, return_tensors='pt')
         dec_input_ids = dec['input_ids'].squeeze(0)
         labels = torch.roll(dec_input_ids, shifts=-1, dims=0)

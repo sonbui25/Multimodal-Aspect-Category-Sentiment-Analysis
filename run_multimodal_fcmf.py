@@ -23,6 +23,7 @@ import json
 from torch.cuda.amp import autocast
 import os
 from torch.optim.lr_scheduler import LambdaLR
+from torch.cuda.amp import GradScaler
 # Map numeric labels back to string for logging
 POLARITY_MAP = {0: 'None', 1: 'Negative', 2: 'Neutral', 3: 'Positive'}
 
@@ -105,7 +106,7 @@ def main():
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of updates steps to accumulate.")
     parser.add_argument('--seed', type=int, default=42, help="random seed for initialization")
     parser.add_argument('--fp16', action='store_true', help="Whether to use 16-bit float precision")
-    parser.add_argument('--alpha', type=float, default=0.7, help="Alpha value for keeping strong visual features")
+    parser.add_argument('--alpha', type=float, default=1, help="Alpha value for keeping strong visual features")
     parser.add_argument('--fine_tune_cnn', action='store_true', help='fine tune pre-trained CNN if True')
     
     # --- SYSTEM ARGUMENTS ---
@@ -291,7 +292,7 @@ def main():
     criterion = torch.nn.CrossEntropyLoss()
     
     if args.fp16:
-        scaler = torch.amp.GradScaler('cuda') 
+        scaler = GradScaler()
     else:
         scaler = None
 

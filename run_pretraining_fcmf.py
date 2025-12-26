@@ -23,7 +23,7 @@ from torch.cuda.amp import autocast
 import os
 from rouge_score import rouge_scorer
 from bert_score import score
-
+from torch.cuda.amp import GradScaler
 def save_model(path, model, optimizer, scheduler, epoch, best_score, scaler=None):
     if hasattr(model, 'module'): model_state = model.module.state_dict()
     else: model_state = model.state_dict()
@@ -106,7 +106,6 @@ def main():
 
     # --- 2. DATA PREP ---
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
-    tokenizer.add_special_tokens({'additional_special_tokens': ['<iaog>']})
     normalize_class = TextNormalize()
 
     try:
@@ -144,7 +143,6 @@ def main():
 
     # --- 3. MODEL ---
     model = FCMFSeq2Seq(len(tokenizer), args.max_len_decoder, args.pretrained_hf_model, args.num_imgs, args.num_rois, args.alpha)
-    model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
     model.decoder.embedding = torch.nn.Embedding(len(tokenizer), model.decoder.num_hiddens)
     
     img_res = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
@@ -167,7 +165,7 @@ def main():
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     
     if args.fp16:
-        scaler = torch.amp.GradScaler('cuda')
+        scaler = GradScaler()
     else:
         scaler = None
     
