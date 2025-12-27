@@ -171,8 +171,8 @@ def main():
     # ==========================================================================================
     try:
         tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
-        special_tokens = {'additional_special_tokens': ['<iaog>']}
-        tokenizer.add_special_tokens(special_tokens)
+        # special_tokens = {'additional_special_tokens': ['<iaog>']}
+        # tokenizer.add_special_tokens(special_tokens)
     except:
         raise ValueError("Wrong pretrained model.")
 
