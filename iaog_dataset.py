@@ -51,12 +51,7 @@ class IAOGDataset(Dataset):
             # 2. Tạo mẫu training riêng biệt cho từng Aspect
             for aspect, words in aspect_group.items():
                 # Chuyển đổi tên Aspect cho tự nhiên (ví dụ Public_area -> Public area)
-                asp_label = "public area" if aspect == "Public_area" else aspect.lower()
-                
-                # CẤU TRÚC MỚI: [Aspect] : [Sentiment1] , [Sentiment2]
-                # Ví dụ: "room : sạch sẽ , đẹp"
-                target_string = f"{asp_label} : {' , '.join(sorted(words))}"
-                
+                target_string = f"{' , '.join(sorted(words))}"
                 self.samples.append({
                     'original_idx': idx,
                     'target_aspect': aspect,
