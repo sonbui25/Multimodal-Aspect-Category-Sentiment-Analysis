@@ -15,7 +15,27 @@ class FCMF(nn.Module):
         self.text_pooler = BertPooler()
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
         self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
+        self.apply_custom_init(self.text_pooler)
+        self.apply_custom_init(self.classifier)
 
+    # Hàm khởi tạo trọng số chuẩn BERT
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if isinstance(module, nn.Linear):
+            # Dùng Normal distribution thay vì Uniform mặc định
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def apply_custom_init(self, module):
+        module.apply(self._init_weights)
     def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None):
 
         output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
