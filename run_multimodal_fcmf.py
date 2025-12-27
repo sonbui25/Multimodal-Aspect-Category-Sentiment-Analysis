@@ -289,7 +289,7 @@ def main():
     criterion = torch.nn.CrossEntropyLoss()
     
     if args.fp16:
-        scaler = GradScaler()
+        scaler = torch.amp.GradScaler('cuda')
     else:
         scaler = None
 
@@ -384,35 +384,13 @@ def main():
         iaog_ckpt = torch.load(args.pretrained_iaog_path, map_location='cpu', weights_only=False)
         iaog_state_dict = iaog_ckpt['model_state_dict']
         
-        # Load Encoder with smart handling for word_embeddings size mismatch
+        # Load Encoder
         encoder_state_dict = {k: v for k, v in iaog_state_dict.items() if k.startswith('encoder.')}
-        model_to_load = model.module if hasattr(model, 'module') else model
-        
-        # Handle word_embeddings size mismatch (IAOG vs FCMF tokenizer vocab size)
-        word_embed_key = 'encoder.bert.cell.embeddings.word_embeddings.weight'
-        if word_embed_key in encoder_state_dict:
-            iaog_embed = encoder_state_dict[word_embed_key]
-            fcmf_embed = model_to_load.encoder.bert.cell.embeddings.word_embeddings.weight
-            
-            if iaog_embed.shape[0] != fcmf_embed.shape[0]:
-                if master_process:
-                    logger.warning(f"Word embeddings size mismatch: IAOG {iaog_embed.shape[0]} vs FCMF {fcmf_embed.shape[0]}")
-                    logger.info(f"Copying first {min(iaog_embed.shape[0], fcmf_embed.shape[0])} embeddings...")
-                
-                # Copy common embeddings, pad with zeros if needed
-                min_size = min(iaog_embed.shape[0], fcmf_embed.shape[0])
-                encoder_state_dict[word_embed_key] = iaog_embed[:min_size]
-        
-        try:
-            missing_keys, unexpected_keys = model_to_load.load_state_dict(encoder_state_dict, strict=False)
-            if master_process and missing_keys:
-                logger.warning(f"Missing keys when loading IAOG encoder (expected): {len(missing_keys)} keys")
-        except RuntimeError as e:
-            if master_process:
-                logger.error(f"Error loading IAOG encoder: {e}")
-            raise
+        model_to_load = model.module if hasattr(model, 'module') else model 
+        missing_keys, unexpected_keys = model_to_load.load_state_dict(encoder_state_dict, strict=False)
         
         # Load ResNet Image từ IAOG
+        dir_name = os.path.dirname(args.pretrained_iaog_path)
         resimg_path = args.pretrained_iaog_path.replace("iaog_model", "resimg_model")
         if os.path.exists(resimg_path):
             if master_process: logger.info(f"    Loading ResNet Image from IAOG: {resimg_path}")
