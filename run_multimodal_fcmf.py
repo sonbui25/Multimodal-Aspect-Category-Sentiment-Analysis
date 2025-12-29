@@ -317,11 +317,11 @@ def main():
             
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
-            # # 1. Load model
-            # if isinstance(model, (DDP, torch.nn.DataParallel)):
-            #     model.module.load_state_dict(checkpoint['model_state_dict'])
-            # else:
-            #     model.load_state_dict(checkpoint['model_state_dict'])
+            # 1. Load model
+            if isinstance(model, (DDP, torch.nn.DataParallel)):
+                model.module.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint['model_state_dict'])
             
             # 2. Load ResNet Weights
             dir_name = os.path.dirname(checkpoint_path)
@@ -348,8 +348,8 @@ def main():
             # 4. Load Scheduler State
             # Thay vì set cứng lại LR, load state của scheduler.
             # Scheduler sẽ biết được đã chạy bao nhiêu bước và tiếp tục giảm LR theo biểu đồ linear decay
-            if 'scheduler_state_dict' in checkpoint:
-                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            # if 'scheduler_state_dict' in checkpoint:
+            #     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             
             start_epoch = checkpoint['epoch'] + 1
             
