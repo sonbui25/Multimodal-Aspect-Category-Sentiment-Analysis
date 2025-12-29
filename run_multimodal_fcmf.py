@@ -317,11 +317,11 @@ def main():
             
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
-            # 1. Load model
-            if isinstance(model, (DDP, torch.nn.DataParallel)):
-                model.module.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                model.load_state_dict(checkpoint['model_state_dict'])
+            # # 1. Load model
+            # if isinstance(model, (DDP, torch.nn.DataParallel)):
+            #     model.module.load_state_dict(checkpoint['model_state_dict'])
+            # else:
+            #     model.load_state_dict(checkpoint['model_state_dict'])
             
             # 2. Load ResNet Weights
             dir_name = os.path.dirname(checkpoint_path)
