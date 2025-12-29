@@ -123,9 +123,6 @@ class Attention(nn.Module):
                 mask = mask.repeat(self.n_head * mb_size, 1, 1)
             score = score.masked_fill(mask == 0, float('-1e4'))
 
-        # debug prints (remove after)
-        # print('kx', kx.dtype, 'qx', qx.dtype, 'score pre-softmax anynan', torch.isnan(score).any().item())
-
         score = F.softmax(score, dim=-1)
         self.attention_weights = score
 
@@ -149,7 +146,7 @@ class Attention(nn.Module):
 #         return super(SelfAttention, self).forward(k, q)
 
 
-class FCMFLayerNorm(nn.Module): #2
+class FCMFLayerNorm(nn.Module): 
     def __init__(self, hidden_size, eps=1e-12):
         """Construct a layernorm module in the TF style (epsilon inside the square root).
         """
@@ -165,7 +162,7 @@ class FCMFLayerNorm(nn.Module): #2
         return self.weight * x + self.bias
 
 
-class BertSelfAttention(nn.Module): #2
+class BertSelfAttention(nn.Module): 
     def __init__(self):
         super(BertSelfAttention, self).__init__()
 
@@ -212,7 +209,7 @@ class BertSelfAttention(nn.Module): #2
         context_layer = context_layer.view(*new_context_layer_shape)
         return context_layer
 
-class BertCoAttention(nn.Module): #3
+class BertCoAttention(nn.Module): 
     def __init__(self):
         super(BertCoAttention, self).__init__()
 
@@ -260,7 +257,7 @@ class BertCoAttention(nn.Module): #3
         return context_layer
 
 
-class BertSelfOutput(nn.Module): #2
+class BertSelfOutput(nn.Module): 
     def __init__(self):
         super(BertSelfOutput, self).__init__()
         self.dense = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE)
@@ -274,7 +271,7 @@ class BertSelfOutput(nn.Module): #2
         return hidden_states
 
 
-class BertAttention(nn.Module): #2
+class BertAttention(nn.Module): 
     def __init__(self):
         super(BertAttention, self).__init__()
         self.self = BertSelfAttention()
@@ -285,7 +282,7 @@ class BertAttention(nn.Module): #2
         attention_output = self.output(self_output, input_tensor)
         return attention_output
 
-class BertCrossAttention(nn.Module): #3
+class BertCrossAttention(nn.Module): 
     def __init__(self):
         super(BertCrossAttention, self).__init__()
         self.self = BertCoAttention()
@@ -322,7 +319,7 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
-class BertLayer(nn.Module): #2
+class BertLayer(nn.Module): 
     def __init__(self):
         super(BertLayer, self).__init__()
         self.attention = BertAttention()
@@ -335,7 +332,7 @@ class BertLayer(nn.Module): #2
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-class BertCrossAttentionLayer(nn.Module): #ok
+class BertCrossAttentionLayer(nn.Module): 
     def __init__(self):
         super(BertCrossAttentionLayer, self).__init__()
         self.attention = BertCrossAttention()
@@ -348,7 +345,7 @@ class BertCrossAttentionLayer(nn.Module): #ok
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-# class BertEncoder(nn.Module): #2
+# class BertEncoder(nn.Module): 
 #     def __init__(self):
 #         super(BertEncoder, self).__init__()
 #         layer = BertLayer()
@@ -364,7 +361,7 @@ class BertCrossAttentionLayer(nn.Module): #ok
 #             all_encoder_layers.append(hidden_states)
 #         return all_encoder_layers
 
-class MultimodalEncoder(nn.Module): #ok
+class MultimodalEncoder(nn.Module): 
     def __init__(self):
         super(MultimodalEncoder, self).__init__()
         layer = BertLayer()
@@ -380,7 +377,7 @@ class MultimodalEncoder(nn.Module): #ok
             all_encoder_layers.append(hidden_states)
         return all_encoder_layers
 
-class BertCrossEncoder(nn.Module): #ok
+class BertCrossEncoder(nn.Module): 
     def __init__(self):
         super(BertCrossEncoder, self).__init__()
         layer = BertCrossAttentionLayer()
@@ -410,7 +407,7 @@ class BertText1Pooler(nn.Module):
         pooled_output = self.activation(pooled_output)
         return pooled_output
     
-class BertPooler(nn.Module): #ok
+class BertPooler(nn.Module): 
     def __init__(self):
         super(BertPooler, self).__init__()
         self.dense = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE)
@@ -424,7 +421,7 @@ class BertPooler(nn.Module): #ok
         pooled_output = self.activation(pooled_output)
         return pooled_output
 
-class FeatureExtractor(torch.nn.Module): #ok
+class FeatureExtractor(torch.nn.Module): 
   def __init__(self, pretrained_path):
     super(FeatureExtractor,self).__init__()
     self.cell = AutoModel.from_pretrained(pretrained_path,
@@ -439,6 +436,7 @@ class FeatureExtractor(torch.nn.Module): #ok
     return seq_out, pooled_out, enc_attentions
 
 class MultimodalDenoisingEncoder(nn.Module):
+    #Module lọc nhiễu ảnh
     def __init__(self, alpha=0.7): 
         """
         Multimodal Denoising Encoder (MDE) với cơ chế Max-Pooling Fusion.
@@ -468,9 +466,9 @@ class MultimodalDenoisingEncoder(nn.Module):
         """
         B, N, H = image_hidden_states.shape
 
-        # ==================================================================
+        
         # 1. Scoring
-        # ==================================================================
+        
         text_query = text_hidden_states[:, 0, :].unsqueeze(1)
         dummy_len = [N] * B
 
@@ -479,9 +477,9 @@ class MultimodalDenoisingEncoder(nn.Module):
         # [B, 12, 1, 49] -> [B, 49]
         scores = raw_scores.view(B, NUM_ATTENTION_HEADS, 1, N).mean(dim=1).squeeze(1)
 
-        # ==================================================================
+        
         # 2. Top-K Selection
-        # ==================================================================
+        
         k_strong = max(1, int(N * self.alpha))
 
         m_weak = N - k_strong
@@ -497,25 +495,25 @@ class MultimodalDenoisingEncoder(nn.Module):
         v_strong = gather(image_hidden_states, idx_strong)
         v_weak = gather(image_hidden_states, idx_weak)
 
-        # ==================================================================
+        
         # 3. Cosine Similarity
-        # ==================================================================
+        
         v_strong_norm = F.normalize(v_strong, p=2, dim=-1)
         v_weak_norm = F.normalize(v_weak, p=2, dim=-1)
         similarity_matrix = torch.matmul(v_weak_norm, v_strong_norm.transpose(-1, -2))
 
-        # ==================================================================
+        
         # 4. Theta & Assignment
-        # ==================================================================
+        
         max_sim_vals, assignment_indices = torch.max(similarity_matrix, dim=-1)
 
         e_val = math.e
         exp_S = torch.exp(max_sim_vals)
         theta_weak = exp_S / (exp_S + e_val)
 
-        # ==================================================================
+        
         # 5. Max-Pool Fusion
-        # ==================================================================
+        
         # A. Assignment Mask
         assignment_mask = F.one_hot(assignment_indices, num_classes=k_strong).float()  # [B, M, K]
 
@@ -541,9 +539,9 @@ class MultimodalDenoisingEncoder(nn.Module):
         # F. Update
         v_strong_updated = (1 - theta_strong) * v_strong + theta_strong * attended_weak_patches
 
-        # ==================================================================
+        
         # 6. Return
-        # ==================================================================
+        
         return v_strong_updated
 
     # Transformer Decoder related modules
@@ -577,7 +575,6 @@ class TransformerDecoderBlock(nn.Module):
     def forward(self, X, state, enc_attention_mask=None, is_train=True):
         enc_outputs, enc_valid_lens = state[0], state[1]
         
-        # ... (Phần Self-Attention giữ nguyên) ...
         if state[2][self.i] is None:
             key_values = X
         else:
@@ -595,13 +592,11 @@ class TransformerDecoderBlock(nn.Module):
         Y = self.addnorm1(X, X2)
         
         # Encoder-decoder attention (Cross-Attention)
-        # [QUAN TRỌNG] Ưu tiên dùng enc_attention_mask nếu có.
+        # Ưu tiên dùng enc_attention_mask nếu có.
         # Nếu không (fallback), dùng enc_valid_lens cũ.
         cross_mask = enc_attention_mask if enc_attention_mask is not None else enc_valid_lens
         
         # Y là Query (Decoder), enc_outputs là Key/Value (Encoder)
-        # Lưu ý: Code gốc của bạn đang gọi: self.attention2(enc_outputs, Y, ...)
-        # Điều này có nghĩa là tham số đầu là Key, tham số hai là Query.
         Y2, _ = self.attention2(enc_outputs, Y, cross_mask)
         
         Z = self.addnorm2(Y, Y2)
@@ -645,12 +640,7 @@ class IAOGDecoder(nn.Module):
         
         self._attention_weights = [[None] * len(self.blks) for _ in range (2)]
         
-        # [XỬ LÝ MASK]
-        # Nếu class Attention của bạn dùng masked_softmax cộng trực tiếp (Score + Mask)
-        # Bạn cần đảm bảo enc_attention_mask ở dạng Float (-10000.0/0.0) và đúng chiều (Batch, 1, 1, SrcLen).
-        # Nếu class Attention dùng valid_lens (độ dài), bạn phải sửa class Attention đó trước.
-        # Giả sử ta đã chuẩn bị mask chuẩn dạng Float từ FCMFSeq2Seq.
-        
+        # XỬ LÝ MASK
         for i, blk in enumerate(self.blks):
             # Truyền mask xuống block
             X, state = blk(X, state, enc_attention_mask=enc_attention_mask, is_train=is_train)

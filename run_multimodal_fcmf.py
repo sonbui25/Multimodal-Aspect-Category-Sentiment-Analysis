@@ -51,7 +51,7 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0, scaler=
         "scheduler_state_dict": scheduler.state_dict(),
     }
     
-    # [THÊM MỚI] Lưu trạng thái scaler nếu có
+    # Lưu trạng thái scaler nếu có
     if scaler is not None:
         checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
 
@@ -76,11 +76,11 @@ def main():
     parser.add_argument("--pretrained_hf_model", default=None, type=str, required=True,
                         help="Pre-trained huggingface model and tokenizer (e.g. xlm-roberta-base).")
     
-    # [NEW] Argument to load the Encoder weights from the IAOG Pretraining phase
+    # Argument to load the Encoder weights from the IAOG Pretraining phase
     parser.add_argument("--pretrained_iaog_path", default=None, type=str,
                         help="Path to the IAOG best checkpoint to initialize Encoder weights from.")
     
-    # [NEW] Argument to resume training from a specific checkpoint
+    # Argument to resume training from a specific checkpoint
     parser.add_argument("--resume_from_checkpoint", default=None, type=str,
                         help="Path to the checkpoint .pth file to resume training from.")
 
@@ -115,9 +115,9 @@ def main():
 
     args = parser.parse_args()
 
-    # ==========================================================================================
+    
     # 1. SETUP DEVICE & LOGGING
-    # ==========================================================================================
+    
     if args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     elif args.ddp:
@@ -166,13 +166,9 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
         torch.distributed.init_process_group(backend='nccl')
 
-    # ==========================================================================================
     # 2. LOAD TOKENIZER & METADATA
-    # ==========================================================================================
     try:
         tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
-        # special_tokens = {'additional_special_tokens': ['<iaog>']}
-        # tokenizer.add_special_tokens(special_tokens)
     except:
         raise ValueError("Wrong pretrained model.")
 
@@ -211,9 +207,9 @@ def main():
         train_dataset = MACSADataset(train_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         dev_dataset = MACSADataset(dev_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
 
-    # ==========================================================================================
+    
     # 3. MODEL INITIALIZATION
-    # ==========================================================================================
+    
     model = FCMF(pretrained_path=args.pretrained_hf_model,
                  num_labels=args.num_polarity,
                  num_imgs=args.num_imgs,
@@ -227,12 +223,12 @@ def main():
 
     model = model.to(device)
     if args.freeze_encoder:
-        # Đóng băng toàn bộ tham số của Encoder (bao gồm BERT + Fusion Layers)
+        # Đóng băng toàn bộ tham số của Encoder nếu có(bao gồm BERT + Fusion Layers)
         for param in model.encoder.parameters():
             param.requires_grad = False
         
         if master_process:
-            logger.info("❄️  FCMFEncoder has been FROZEN! Only Classifier Head will be trained.")
+            logger.info("FCMFEncoder has been FROZEN! Only Classifier Head will be trained.")
     if args.ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
         resnet_img = DDP(resnet_img, device_ids=[ddp_local_rank])
@@ -242,16 +238,16 @@ def main():
         resnet_img = torch.nn.DataParallel(resnet_img)
         resnet_roi = torch.nn.DataParallel(resnet_roi)
 
-    # ==========================================================================================
+    
     # 4. OPTIMIZER & SCHEDULER
-    # ==========================================================================================
+    
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     encoder_params = []
     head_params = []
     head_names = ['classifier', 'text_pooler'] 
     
     for n, p in model.named_parameters():
-        # [QUAN TRỌNG] Chỉ lấy những tham số nào được phép train (requires_grad=True)
+        # Chỉ lấy những tham số nào được phép train (requires_grad=True)
         if not p.requires_grad:
             continue
 
@@ -293,9 +289,9 @@ def main():
     else:
         scaler = None
 
-    # ==========================================================================================
+    
     # 5. CHECKPOINT LOADING
-    # ==========================================================================================
+    
     start_epoch = 0
     max_f1 = 0.0
 
@@ -346,12 +342,12 @@ def main():
                 unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
 
             # 3. Load optimizer
-            # Việc này sẽ khôi phục lại Learning Rate tại thời điểm lưu file (cuối epoch 6)
+            # Việc này sẽ khôi phục lại Learning Rate tại thời điểm lưu file
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             
             # 4. Load Scheduler State
-            # [QUAN TRỌNG] Thay vì set cứng lại LR, ta load state của scheduler.
-            # Scheduler sẽ biết được "đã chạy bao nhiêu bước" và tiếp tục giảm LR theo biểu đồ linear decay
+            # Thay vì set cứng lại LR, load state của scheduler.
+            # Scheduler sẽ biết được đã chạy bao nhiêu bước và tiếp tục giảm LR theo biểu đồ linear decay
             if 'scheduler_state_dict' in checkpoint:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             
@@ -410,9 +406,9 @@ def main():
     else:
         if master_process: logger.info("--> No checkpoint or pretrained IAOG path provided. Training from scratch.")
 
-    # ==========================================================================================
+    
     # 6. TRAINING LOOP
-    # ==========================================================================================
+    
     if args.do_train:
         if not args.ddp:
             train_sampler = RandomSampler(train_dataset)
@@ -488,7 +484,7 @@ def main():
                         tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
             if master_process:
             # Lấy LR hiện tại từ Optimizer (nhóm 0 là Encoder, nhóm 2 là Classifier Head)
-            # Lưu ý: Code của config 4 nhóm param, nhóm 0&1 là encoder, 2&3 là head, nên lấy 0 và 2 vì giá trị lr giống nhau trong mỗi nhóm
+            # Code của config 4 nhóm param, nhóm 0&1 là encoder, 2&3 là head, nên lấy 0 và 2 vì giá trị lr giống nhau trong mỗi nhóm
                 current_encoder_learning_rate = optimizer.param_groups[0]['lr']
                 current_head_lr = optimizer.param_groups[2]['lr']
                 logger.info(f"--> Epoch {train_idx} Completed.")
@@ -510,7 +506,6 @@ def main():
                         all_input_ids, all_token_types_ids, all_attn_mask, \
                         all_added_input_mask, all_label_id, _ = batch
 
-                        # [CRITICAL] Fix DoubleTensor error in Eval
                         roi_img_features = roi_img_features.float()
 
                         encoded_img = []
@@ -561,9 +556,9 @@ def main():
                 save_model(f'{args.output_dir}/seed_{args.seed}_fcmf_model_last.pth', model, optimizer, scheduler, train_idx, best_score=max_f1, scaler=scaler if args.fp16 else None)
                 save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, train_idx, scaler=scaler if args.fp16 else None)
                 save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, train_idx, scaler=scaler if args.fp16 else None)
-    # ==========================================================================================
-    # 7. TEST EVALUATION (With Detailed Logging)
-    # ==========================================================================================
+    
+    # 7. TEST EVALUATION
+    
     if args.do_eval and master_process:
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
         
@@ -601,7 +596,7 @@ def main():
         true_label_list = {asp:[] for asp in ASPECT}
         pred_label_list = {asp:[] for asp in ASPECT}
         
-        # [NEW] List to store results for formatted log
+        # List to store results for formatted log
         formatted_results = []
 
         with torch.no_grad():
@@ -612,7 +607,6 @@ def main():
                 all_input_ids, all_token_types_ids, all_attn_mask, 
                 all_added_input_mask, all_label_id, batch_texts) = batch
 
-                # [CRITICAL] Fix DoubleTensor error in Test
                 roi_img_features = roi_img_features.float()
 
                 encoded_img = []

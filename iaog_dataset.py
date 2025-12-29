@@ -27,7 +27,6 @@ class IAOGDataset(Dataset):
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
         ])
 
-        # --- LOGIC MỚI: FLATTEN DỮ LIỆU ---
         self.samples = []
         for idx, row in self.data.iterrows():
             iaog_labels_raw = row.get('iaog_labels', [])
@@ -50,7 +49,7 @@ class IAOGDataset(Dataset):
             
             # 2. Tạo mẫu training riêng biệt cho từng Aspect
             for aspect, words in aspect_group.items():
-                # Chuyển đổi tên Aspect cho tự nhiên (ví dụ Public_area -> Public area)
+                # Chuyển đổi tên Aspect (ví dụ Public_area -> Public area)
                 target_string = f"{' , '.join(sorted(words))}"
                 self.samples.append({
                     'original_idx': idx,

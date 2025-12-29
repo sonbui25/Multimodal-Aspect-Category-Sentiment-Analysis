@@ -240,13 +240,11 @@ def main():
             optimizer.zero_grad()
             
             pbar = tqdm(train_loader, disable=not master_process)
-            # ... (Trong vòng lặp epoch)
             for step, batch in enumerate(pbar):
                 pbar.set_description(f"Epoch {epoch}")
                 
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                 
-                # UNPACK MỚI (Flattened)
                 (t_img_f, roi_img_f, roi_coors, 
                  labels, dec_input_ids, 
                  enc_ids, enc_type, enc_mask, add_mask, _, _) = batch
@@ -254,15 +252,14 @@ def main():
                 roi_img_f = roi_img_f.float()
 
                 with torch.amp.autocast('cuda', enabled=args.fp16):
-                    # Visual Extraction (Giữ nguyên)
+                    # Visual Extraction
                     with torch.no_grad():
                          enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
                          vis_embeds = torch.stack(enc_imgs, dim=1)
                          enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                          roi_embeds = torch.stack(enc_rois, dim=1)
 
-                    # --- LOGIC TRAIN MỚI (KHÔNG CÒN FOR LOOP 6 ASPECT) ---
-                    # Model Forward trực tiếp
+                    # --- LOGIC TRAIN---
                     logits = model(
                         enc_X=enc_ids, 
                         dec_X=dec_input_ids, 
@@ -306,7 +303,7 @@ def main():
                     for batch in tqdm(dev_loader, desc="Eval Beam", leave=False):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                         
-                        # [FIX] Unpack đủ 11 biến
+                        # Unpack đủ 11 biến
                         (t_img_f, roi_img_f, roi_coors, 
                          all_labels, dec_input_ids, 
                          all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
@@ -318,7 +315,7 @@ def main():
                         enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         roi_embeds = torch.stack(enc_rois, dim=1)
 
-                        # [FIX] Loop qua Batch Size (KHÔNG CÒN loop 6 aspect)
+                        # Loop qua Batch Size
                         batch_size = all_enc_ids.shape[0]
                         for i in range(batch_size):
                             aspect_name = batch_aspect_names[i]
@@ -406,15 +403,13 @@ def main():
         test_preds = {asp: [] for asp in ASPECT_LIST}
         test_refs = {asp: [] for asp in ASPECT_LIST}
         
-        # Dictionary tạm để gom nhóm kết quả theo câu (cho phần Logging)
-        # Key: sentence_text -> Value: {Aspect: {predict, label}}
         temp_results_by_text = {} 
 
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Test with Beam Search"):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                 
-                # [FIX 1] Unpack đúng tên biến và lấy đủ 11 phần tử
+                # Unpack và lấy đủ 11 phần tử
                 (t_img_f, roi_img_f, roi_coors, 
                  all_dec_lbls, dec_input_ids,  # Đổi tên labels -> all_dec_lbls
                  all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
@@ -428,7 +423,7 @@ def main():
 
                 batch_size = all_enc_ids.shape[0]
                 
-                # [FIX 2] XÓA VÒNG LẶP ASPECT (range 6). Duyệt theo Batch Size.
+                # Loop qua Batch Size
                 for i in range(batch_size):
                     # Lấy thông tin của mẫu hiện tại
                     aspect_name = batch_aspect_names[i]
@@ -510,7 +505,7 @@ def main():
             f.write(f"MACRO AVERAGE   | P: {avg_rP:.4f} | R: {avg_rR:.4f} | F1: {avg_rF1:.4f}\n")
             f.write("="*50 + "\n\n")
             
-            # --- PHẦN 2: DETAILED LOGS (ĐÃ CHỈNH SỬA) ---
+            # --- PHẦN 2: DETAILED LOGS ---
             f.write("DETAILED PREDICTIONS (Filtered View):\n")
             
             for i, sample in enumerate(all_test_results):
@@ -524,7 +519,7 @@ def main():
                     pred = str(res['predict']).strip()
                     label = str(res['label']).strip()
                     
-                    # LOGIC LỌC: Ẩn nếu CẢ hai đều là none hoặc rỗng
+                    # LOGIC LỌC: Ẩn nếu CẢ hai nếu nhãn và dự đoán đều là 'none' hoặc rỗng
                     is_pred_none = (pred.lower() == 'none' or pred == '')
                     is_label_none = (label.lower() == 'none' or label == '')
                     
