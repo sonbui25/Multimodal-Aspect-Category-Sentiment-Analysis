@@ -348,8 +348,8 @@ def main():
             # 4. Load Scheduler State
             # Thay vì set cứng lại LR, load state của scheduler.
             # Scheduler sẽ biết được đã chạy bao nhiêu bước và tiếp tục giảm LR theo biểu đồ linear decay
-            # if 'scheduler_state_dict' in checkpoint:
-            #     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             
             start_epoch = checkpoint['epoch'] + 1
             
