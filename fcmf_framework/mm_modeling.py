@@ -604,16 +604,17 @@ class TransformerDecoderBlock(nn.Module):
     
 class PositionalEncoding(nn.Module): 
     """Positional encoding."""
-    def __init__(self, max_len_decoder): #Pay attention to max length of decoder input because of using positional encoding only at decoder side
+    def __init__(self): 
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(ATTENTION_PROBS_DROPOUT_PROB)
-        # Create a long enough P
-        self.P = torch.zeros((1, max_len_decoder, HIDDEN_SIZE))
-        X = torch.arange(max_len_decoder, dtype=torch.float32).reshape(
+        # Create a long enough P using MAX_POSITION_EMBEDDINGS
+        P = torch.zeros((1, MAX_POSITION_EMBEDDINGS, HIDDEN_SIZE))
+        X = torch.arange(MAX_POSITION_EMBEDDINGS, dtype=torch.float32).reshape(
             -1, 1) / torch.pow(10000, torch.arange(
             0, HIDDEN_SIZE, 2, dtype=torch.float32) / HIDDEN_SIZE)
-        self.P[:, :, 0::2] = torch.sin(X)
-        self.P[:, :, 1::2] = torch.cos(X)
+        P[:, :, 0::2] = torch.sin(X)
+        P[:, :, 1::2] = torch.cos(X)
+        self.register_buffer('P', P)
 
     def forward(self, X):
         pe = self.P[:, :X.size(1), :].to(device=X.device).type_as(X)
@@ -621,12 +622,12 @@ class PositionalEncoding(nn.Module):
         X = X + pe
         return self.dropout(X)
 class IAOGDecoder(nn.Module):
-    def __init__(self, vocab_size, max_len_decoder):
+    def __init__(self, vocab_size):
         super(IAOGDecoder, self).__init__()
         self.num_hiddens = HIDDEN_SIZE
         self.num_blks = NUM_HIDDEN_LAYERS
         self.embedding = nn.Embedding(vocab_size, self.num_hiddens)
-        self.pos_encoding = PositionalEncoding(max_len_decoder=max_len_decoder)
+        self.pos_encoding = PositionalEncoding()
         self.blks = nn.Sequential()
         for i in range(NUM_HIDDEN_LAYERS):
             self.blks.add_module('block' + str(i), TransformerDecoderBlock(i))
