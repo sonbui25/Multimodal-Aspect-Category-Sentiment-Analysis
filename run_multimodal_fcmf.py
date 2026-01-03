@@ -261,45 +261,54 @@ def main():
     
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     encoder_params = []
-    head_params = []
-    head_names = ['classifier', 'text_pooler'] 
+    decoder_params = [] # Đổi tên cho rõ nghĩa (trước là head_params)
+    
+    # [QUAN TRỌNG] Tận dụng lại biến args.classifier_head_learning_rate cho Decoder
+    # Trong FCMFSeq2Seq, tên các layer decoder thường bắt đầu bằng "decoder."
+    decoder_names = ['decoder'] 
     
     for n, p in model.named_parameters():
-        # Chỉ lấy những tham số nào được phép train (requires_grad=True)
         if not p.requires_grad:
             continue
 
-        if any(nd in n for nd in head_names):
-            head_params.append((n, p))
+        # Nếu tên tham số chứa chữ 'decoder', đưa vào nhóm Decoder
+        if any(nd in n for nd in decoder_names):
+            decoder_params.append((n, p))
         else:
+            # Còn lại là Encoder (BERT, ResNet projection, Fusion layers...)
             encoder_params.append((n, p))
 
-    # (Phần optimizer_grouped_parameters phía sau giữ nguyên, vì list params giờ đã sạch)
     optimizer_grouped_parameters = [
+        # --- Group 1: Encoder (LR Thấp) ---
         {
             'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
             'lr': args.encoder_learning_rate 
         },
         {
-            'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
+            'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)], 
             'weight_decay': 0.0,
             'lr': args.encoder_learning_rate
         },
-        # Head Group: Higher LR
+        
+        # --- Group 2: Decoder (LR Cao hơn - Thay thế cho Classifier Head cũ) ---
+        # Tận dụng lại biến args.classifier_head_learning_rate cho Decoder
         {
-            'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)], # For weights
+            'params': [p for n, p in decoder_params if not any(nd in n for nd in no_decay)],
             'weight_decay': 0.01,
             'lr': args.classifier_head_learning_rate 
         },
         {
-            'params': [p for n, p in head_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
+            'params': [p for n, p in decoder_params if any(nd in n for nd in no_decay)], 
             'weight_decay': 0.0,
             'lr': args.classifier_head_learning_rate
         }
     ]
 
+    # Optimizer khởi tạo với LR mặc định là của Decoder (head)
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.classifier_head_learning_rate)
+    
+    # Hàm Loss cho sinh chuỗi (Seq2Seq)
     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
     
     if args.fp16:
