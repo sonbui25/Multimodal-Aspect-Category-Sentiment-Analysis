@@ -440,7 +440,7 @@ class FCMFSeq2Seq(nn.Module):
     def __init__(self, vocab_size, max_len_decoder, pretrained_hf_path, num_imgs, num_roi, alpha):
         super(FCMFSeq2Seq, self).__init__()
         self.encoder = FCMFEncoder(pretrained_hf_path, num_imgs=num_imgs, num_roi=num_roi, alpha=alpha)
-        self.decoder = IAOGDecoder(vocab_size=vocab_size, max_len_decoder=max_len_decoder)
+        self.decoder = IAOGDecoder(vocab_size=vocab_size)
         self.num_imgs = num_imgs
         # --- Weight Initialization ---
         self.decoder.apply(self._init_weights)
