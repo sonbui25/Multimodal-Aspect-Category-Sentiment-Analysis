@@ -21,7 +21,12 @@ class MACSADataset(torch.utils.data.Dataset):
             "Neutral": 2,
             "Positive": 3
         }
-
+        self.id2text = {
+            0: "none",
+            1: "negative",
+            2: "neutral",
+            3: "positive"
+        }
         self.transform = transforms.Compose([
                             transforms.Resize((224,224),antialias=True),  
                             transforms.ConvertImageDtype(torch.float32),
@@ -83,8 +88,11 @@ class MACSADataset(torch.utils.data.Dataset):
         all_input_ids = []
         all_token_types_ids = []
         all_attn_mask = []
-        all_label_id = []
         all_added_input_mask = []
+        
+        #Thêm list để chứa input và label cho Decoder
+        all_dec_input_ids = []
+        all_dec_labels = []
 
         for ix in range(len(self.ASPECT)):
             asp = self.ASPECT[ix]
@@ -105,20 +113,47 @@ class MACSADataset(torch.utils.data.Dataset):
             attention_mask = torch.tensor(tokens['attention_mask'])
             added_input_mask = torch.tensor( [1] * (170+49))
 
-            label_id = list_polar[idx_asp_in_list_asp]
-
+            # 1. Lấy nhãn dạng số (ví dụ: 3)
+            label_id_num = self.pola_to_num[list_polar[idx_asp_in_list_asp]]
+            
+            # 2. Chuyển sang text (ví dụ: "positive")
+            label_text = self.id2text[label_id_num]
+            
+            # 3. Tokenize nhãn cho Decoder
+            # Target output: [BOS] positive [EOS]
+            # Ta để max_length ngắn (khoảng 5-10) vì nhãn rất ngắn
+            dec_enc = self.tokenizer(
+                label_text,
+                max_length=10, 
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+            dec_input_ids = dec_enc['input_ids'].squeeze(0)
+            
+            # 4. Tạo labels để tính Loss (Shift phải 1 bước)
+            # Input: [BOS, pos, itive, PAD] -> Label: [pos, itive, EOS, -100]
+            labels = torch.roll(dec_input_ids, shifts=-1, dims=0)
+            labels[-1] = -100 # Ignore token cuối do roll
+            labels[labels == self.tokenizer.pad_token_id] = -100 # Ignore padding
+            
+            all_dec_input_ids.append(dec_input_ids)
+            all_dec_labels.append(labels)
+            
+            # Vẫn giữ lại encoder inputs
             all_input_ids.append(input_ids)
             all_token_types_ids.append(token_type_ids)
             all_attn_mask.append(attention_mask)
             all_added_input_mask.append(added_input_mask)
-            all_label_id.append(self.pola_to_num[label_id])
 
-        all_input_ids = torch.stack(all_input_ids,dim=0)
+        all_input_ids = torch.stack(all_input_ids, dim=0)
         all_token_types_ids = torch.stack(all_token_types_ids)
         all_attn_mask = torch.stack(all_attn_mask)
         all_added_input_mask = torch.stack(all_added_input_mask)
 
-        all_label_id = torch.tensor(all_label_id)
+        #Stack Decoder tensors
+        all_dec_input_ids = torch.stack(all_dec_input_ids, dim=0)
+        all_dec_labels = torch.stack(all_dec_labels, dim=0)
 
         list_img_path = idx_data[1]
         
@@ -199,4 +234,9 @@ class MACSADataset(torch.utils.data.Dataset):
         roi_coors = torch.tensor(roi_coors)
 
         # [CHANGE] Trả về thêm text để log
-        return t_img_features, roi_img_features, roi_coors, all_input_ids, all_token_types_ids, all_attn_mask, all_added_input_mask, all_label_id, text
+        return (
+            t_img_features, roi_img_features, roi_coors, 
+            all_input_ids, all_token_types_ids, all_attn_mask, all_added_input_mask, 
+            all_dec_input_ids, all_dec_labels, # <--- Decoder inputs + labels
+            text 
+        )

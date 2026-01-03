@@ -24,9 +24,16 @@ from torch.cuda.amp import autocast
 import os
 from torch.optim.lr_scheduler import LambdaLR
 from torch.cuda.amp import GradScaler
+from fcmf_framework.fcmf_pretraining import FCMFSeq2Seq, beam_search
 # Map numeric labels back to string for logging
 POLARITY_MAP = {0: 'None', 1: 'Negative', 2: 'Neutral', 3: 'Positive'}
-
+# Hàm map text sinh ra về lại số để tính F1
+def text_to_label_id(text):
+    text = text.lower().strip()
+    if "positive" in text: return 3
+    if "negative" in text: return 1
+    if "neutral" in text: return 2
+    return 0 # Mặc định là None
 def warmup_linear(x, warmup=0.002):
     if x < warmup:
         return x/warmup
@@ -210,12 +217,23 @@ def main():
     
     # 3. MODEL INITIALIZATION
     
-    model = FCMF(pretrained_path=args.pretrained_hf_model,
-                 num_labels=args.num_polarity,
-                 num_imgs=args.num_imgs,
-                 num_roi=args.num_rois,
-                 alpha=args.alpha)
-    model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
+    model = FCMFSeq2Seq(
+        vocab_size=len(tokenizer),
+        max_len_decoder=10, 
+        pretrained_hf_path=args.pretrained_hf_model,
+        num_imgs=args.num_imgs,
+        num_roi=args.num_rois,
+        alpha=args.alpha
+    )
+    # Resize embedding cho khớp tokenizer
+    model.decoder.embedding = torch.nn.Embedding(len(tokenizer), model.decoder.num_hiddens)
+    if hasattr(model.encoder.bert.cell, 'resize_token_embeddings'):
+        model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
+        
+    # Weight Tying (quan trọng cho generative)
+    if hasattr(model.encoder.bert.cell, 'embeddings'):
+        model.decoder.embedding.weight = model.encoder.bert.cell.embeddings.word_embeddings.weight
+    model.decoder.dense.weight = model.decoder.embedding.weight
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
     roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
     resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
@@ -282,7 +300,7 @@ def main():
     ]
 
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.classifier_head_learning_rate)
-    criterion = torch.nn.CrossEntropyLoss()
+    loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
     
     if args.fp16:
         scaler = GradScaler()
@@ -434,7 +452,8 @@ def main():
                     batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                     (t_img_features, roi_img_features, roi_coors, 
                     all_input_ids, all_token_types_ids, all_attn_mask, 
-                    all_added_input_mask, all_label_id, _) = batch
+                    all_added_input_mask, all_dec_input_ids, all_dec_labels,
+                    batch_texts) = batch
 
                     # [CRITICAL] Fix DoubleTensor error by casting to float
                     roi_img_features = roi_img_features.float()
@@ -457,16 +476,22 @@ def main():
                         # Loop Aspects
                         all_asp_loss = 0
                         for id_asp in range(len(ASPECT)):
+                            # Gọi Forward của FCMFSeq2Seq
                             logits = model(
-                                input_ids=all_input_ids[:,id_asp,:],
-                                token_type_ids=all_token_types_ids[:,id_asp,:],
-                                attention_mask=all_attn_mask[:,id_asp,:],
-                                added_attention_mask=all_added_input_mask[:,id_asp,:],
-                                visual_embeds_att=vis_embeds,
-                                roi_embeds_att=roi_embeds,
-                                roi_coors=roi_coors
+                                enc_X=all_input_ids[:, id_asp, :], 
+                                dec_X=all_dec_input_ids[:, id_asp, :], # Input cho decoder (vd: [BOS] positive)
+                                visual_embeds_att=vis_embeds, 
+                                roi_embeds_att=roi_embeds, 
+                                roi_coors=roi_coors,
+                                token_type_ids=all_token_types_ids[:, id_asp, :], 
+                                attention_mask=all_attn_mask[:, id_asp, :], 
+                                added_attention_mask=all_added_input_mask[:, id_asp, :],
+                                is_train=True
                             )
-                            loss = criterion(logits, all_label_id[:,id_asp])
+                            
+                            # Tính Loss: So sánh logits với labels (vd: positive [EOS])
+                            # Logits: [Batch, Seq_Len, Vocab] -> Permute để khớp CrossEntropy: [Batch, Vocab, Seq_Len]
+                            loss = loss_fct(logits.permute(0, 2, 1), all_dec_labels[:, id_asp, :])
                             all_asp_loss += loss
 
                         if args.gradient_accumulation_steps > 1:
@@ -502,10 +527,11 @@ def main():
                 with torch.no_grad():
                     for batch in tqdm(dev_dataloader, desc="Evaluating Dev", leave=False):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
-                        t_img_features, roi_img_features, roi_coors, \
-                        all_input_ids, all_token_types_ids, all_attn_mask, \
-                        all_added_input_mask, all_label_id, _ = batch
-
+                        (t_img_features, roi_img_features, roi_coors, 
+                         all_input_ids, all_token_types_ids, all_attn_mask, 
+                         all_added_input_mask, all_dec_input_ids, all_dec_labels, 
+                         batch_texts) = batch
+                        batch_size = all_input_ids.shape[0]
                         roi_img_features = roi_img_features.float()
 
                         encoded_img = []
@@ -522,19 +548,34 @@ def main():
                         roi_embeds = torch.stack(encoded_roi, dim=1)
 
                         for id_asp in range(len(ASPECT)):
-                            logits = model(
-                                input_ids=all_input_ids[:,id_asp,:],
-                                token_type_ids=all_token_types_ids[:,id_asp,:],
-                                attention_mask=all_attn_mask[:,id_asp,:],
-                                added_attention_mask=all_added_input_mask[:,id_asp,:],
-                                visual_embeds_att=vis_embeds,
-                                roi_embeds_att=roi_embeds,
-                                roi_coors=roi_coors
-                            )
-                            pred = np.argmax(logits.detach().cpu().numpy(), axis=-1)
-                            label = all_label_id[:,id_asp].cpu().numpy()
-                            true_label_list[idx2asp[id_asp]].append(label)
-                            pred_label_list[idx2asp[id_asp]].append(pred)
+                            for i in range(batch_size):
+                                # 1. Sinh chuỗi dự đoán
+                                pred_text_seq = beam_search(
+                                    model=model, tokenizer=tokenizer,
+                                    enc_ids=all_input_ids[i, id_asp, :],
+                                    enc_mask=all_attn_mask[i, id_asp, :],
+                                    enc_type=all_token_types_ids[i, id_asp, :],
+                                    add_mask=all_added_input_mask[i, id_asp, :],
+                                    vis_embeds=vis_embeds[i].unsqueeze(0), # Thêm dim batch=1
+                                    roi_embeds=roi_embeds[i].unsqueeze(0),
+                                    roi_coors=roi_coors[i].unsqueeze(0),
+                                    beam_size=3, # Hoặc 1 (Greedy) cho nhanh
+                                    max_len=5,   # Nhãn ngắn thôi
+                                    device=device
+                                )[0]
+                                
+                                # 2. Map chuỗi sinh ra về số (0,1,2,3)
+                                pred_label_id = text_to_label_id(pred_text_seq)
+                                
+                                # 3. Lấy nhãn thực tế (Map từ token id về số)
+                                # Labels đang là [pos, itive, EOS, -100...]. Decode ra text rồi map về số.
+                                lbl_tokens = all_dec_labels[i, id_asp, :].cpu().numpy()
+                                lbl_tokens = lbl_tokens[lbl_tokens != -100] # Bỏ padding
+                                true_text = tokenizer.decode(lbl_tokens, skip_special_tokens=True)
+                                true_label_id = text_to_label_id(true_text)
+                                
+                                true_label_list[ASPECT[id_asp]].append(true_label_id)
+                                pred_label_list[ASPECT[id_asp]].append(pred_label_id)
 
                 all_f1 = 0
                 for id_asp in range(len(ASPECT)):
@@ -558,25 +599,31 @@ def main():
                 save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, train_idx, scaler=scaler if args.fp16 else None)
     
     # 7. TEST EVALUATION
-    
     if args.do_eval and master_process:
-        logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
+        logger.info("\n\n===================== STARTING TEST EVALUATION (GENERATIVE) =====================")
         
         test_data = pd.read_json(f'{args.data_dir}/test.json')
         test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+        
+        # Dataset này giờ đã trả về dec_input_ids và labels dạng chữ
         test_dataset = MACSADataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
         best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
+        
+        # [QUAN TRỌNG] Load lại model với kiến trúc Seq2Seq
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device, weights_only=False)
+            
+            # Lưu ý: Model lúc này phải là FCMFSeq2Seq (đã init ở trên hàm main)
+            # Nếu model đang bọc DDP/DataParallel thì load vào module
             if isinstance(model, (DDP, torch.nn.DataParallel)):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
             else:
                 model.load_state_dict(checkpoint['model_state_dict'])
             
-            # Load ResNets
+            # Load ResNets (như cũ)
             rimg_path = best_path.replace("fcmf", "resimg")
             if os.path.exists(rimg_path):
                 rimg_ckpt = torch.load(rimg_path, map_location=device)
@@ -596,81 +643,104 @@ def main():
         true_label_list = {asp:[] for asp in ASPECT}
         pred_label_list = {asp:[] for asp in ASPECT}
         
-        # List to store results for formatted log
         formatted_results = []
 
         with torch.no_grad():
-            for batch in tqdm(test_dataloader, desc="Evaluating Test"):
+            for batch in tqdm(test_dataloader, desc="Evaluating Test (Beam Search)"):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
-                # Unpack bao gồm text
+                
+                # [QUAN TRỌNG] Unpack đúng số lượng biến (khớp với Dataset đã sửa)
                 (t_img_features, roi_img_features, roi_coors, 
-                all_input_ids, all_token_types_ids, all_attn_mask, 
-                all_added_input_mask, all_label_id, batch_texts) = batch
+                 all_input_ids, all_token_types_ids, all_attn_mask, 
+                 all_added_input_mask, all_dec_input_ids, all_dec_labels, 
+                 batch_texts) = batch
 
                 roi_img_features = roi_img_features.float()
 
+                # Feature Extraction
                 encoded_img = []
                 for img_idx in range(args.num_imgs):
                     img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
                     encoded_img.append(img_f)
+                
                 encoded_roi = []
                 for img_idx in range(args.num_imgs):
                     roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
                     encoded_roi.append(torch.stack(roi_list, dim=1))
+                
                 vis_embeds = torch.stack(encoded_img, dim=1)
                 roi_embeds = torch.stack(encoded_roi, dim=1)
 
-                # Initialize logs for current batch
+                # Prepare logs
                 batch_logs = [{"text": t, "aspects": {}} for t in batch_texts]
+                batch_size = all_input_ids.shape[0]
 
                 for id_asp in range(len(ASPECT)):
                     aspect_name = ASPECT[id_asp]
                     
-                    logits = model(
-                        input_ids=all_input_ids[:,id_asp,:],
-                        token_type_ids=all_token_types_ids[:,id_asp,:],
-                        attention_mask=all_attn_mask[:,id_asp,:],
-                        added_attention_mask=all_added_input_mask[:,id_asp,:],
-                        visual_embeds_att=vis_embeds,
-                        roi_embeds_att=roi_embeds,
-                        roi_coors=roi_coors
-                    )
-                    preds = np.argmax(logits.detach().cpu().numpy(), axis=-1)
-                    labels = all_label_id[:,id_asp].cpu().numpy()
-                    
-                    true_label_list[aspect_name].append(labels)
-                    pred_label_list[aspect_name].append(preds)
-                    
-                    # Store detailed result
-                    for i, (p, l) in enumerate(zip(preds, labels)):
+                    # Loop qua từng sample trong batch để chạy Beam Search
+                    for i in range(batch_size):
+                        # 1. Sinh chuỗi (Predict)
+                        pred_text_seq = beam_search(
+                            model=model, tokenizer=tokenizer,
+                            enc_ids=all_input_ids[i, id_asp, :],
+                            enc_mask=all_attn_mask[i, id_asp, :],
+                            enc_type=all_token_types_ids[i, id_asp, :],
+                            add_mask=all_added_input_mask[i, id_asp, :],
+                            vis_embeds=vis_embeds[i].unsqueeze(0),
+                            roi_embeds=roi_embeds[i].unsqueeze(0),
+                            roi_coors=roi_coors[i].unsqueeze(0),
+                            beam_size=3,
+                            max_len=5, # Nhãn ngắn (none, positive...)
+                            device=device
+                        )[0]
+                        
+                        # 2. Lấy nhãn thật (Ground Truth)
+                        # Decode từ all_dec_labels (bỏ padding -100)
+                        lbl_tokens = all_dec_labels[i, id_asp, :].cpu().numpy()
+                        lbl_tokens = lbl_tokens[lbl_tokens != -100]
+                        true_text_seq = tokenizer.decode(lbl_tokens, skip_special_tokens=True)
+                        
+                        # 3. Map Text -> ID số (để tính F1)
+                        pred_id = text_to_label_id(pred_text_seq)
+                        true_id = text_to_label_id(true_text_seq)
+                        
+                        true_label_list[aspect_name].append(true_id)
+                        pred_label_list[aspect_name].append(pred_id)
+                        
+                        # 4. Log chi tiết
                         batch_logs[i]["aspects"][aspect_name] = {
-                            "predict": POLARITY_MAP.get(p, "Unknown"),
-                            "label": POLARITY_MAP.get(l, "Unknown")
+                            "predict": pred_text_seq, # Lưu text sinh ra để kiểm tra
+                            "label": true_text_seq,
+                            "pred_id": pred_id,
+                            "label_id": true_id
                         }
                 
                 formatted_results.extend(batch_logs)
 
-        # 1. Calculate & Save Metrics
-        output_eval_file = os.path.join(args.output_dir, "test_results_fcmf.txt")
+        # --- Phần tính toán Metrics giữ nguyên logic cũ ---
+        output_eval_file = os.path.join(args.output_dir, "test_results_generative.txt")
         with open(output_eval_file, "w") as writer:
-            writer.write("***** Test results *****\n")
+            writer.write("***** Test results (Generative) *****\n")
             all_f1 = 0
             for id_asp in range(len(ASPECT)):
-                tr = np.concatenate(true_label_list[ASPECT[id_asp]])
-                pr = np.concatenate(pred_label_list[ASPECT[id_asp]])
+                tr = np.array(true_label_list[ASPECT[id_asp]])
+                pr = np.array(pred_label_list[ASPECT[id_asp]])
+                
                 precision, recall, f1 = macro_f1(tr, pr)
                 all_f1 += f1
+                
                 writer.write(f"{ASPECT[id_asp]} - P: {precision:.4f}, R: {recall:.4f}, F1: {f1:.4f}\n")
                 logger.info(f"{ASPECT[id_asp]} - F1: {f1:.4f}")
             
             avg_f1 = all_f1 / len(ASPECT)
-            writer.write(f"Average F1: {avg_f1:.4f}\n")
-            logger.info(f"Average F1: {avg_f1:.4f}")
+            writer.write(f"Average Macro F1: {avg_f1:.4f}\n")
+            logger.info(f"Average Macro F1: {avg_f1:.4f}")
 
-        # 2. Save Formatted Detailed Log
-        log_path = f"{args.output_dir}/test_predictions_formatted.txt"
+        # Save logs
+        log_path = f"{args.output_dir}/test_predictions_generative.txt"
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"TEST DETAILED PREDICTIONS\n")
+            f.write(f"TEST DETAILED PREDICTIONS (GENERATIVE)\n")
             f.write(f"Average Macro F1: {avg_f1:.4f}\n")
             f.write("="*50 + "\n\n")
             
@@ -678,10 +748,10 @@ def main():
                 f.write("{\n")
                 f.write(f"Sentence {i}: {sample['text']}\n")
                 for asp in ASPECT:
-                    res = sample['aspects'].get(asp, {'predict': 'N/A', 'label': 'N/A'})
+                    res = sample['aspects'].get(asp, {})
                     f.write(f"{asp}:\n")
-                    f.write(f"   predict: {res['predict']}\n")
-                    f.write(f"   label:   {res['label']}\n")
+                    f.write(f"   predict: {res.get('predict', 'N/A')} (ID: {res.get('pred_id')})\n")
+                    f.write(f"   label:   {res.get('label', 'N/A')} (ID: {res.get('label_id')})\n")
                 f.write("}\n")
         
         logger.info(f"Formatted predictions saved to {log_path}")
