@@ -568,7 +568,7 @@ def main():
         test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
         # best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
-        best_path = f'/kaggle/input/iaog-fcmf-baseline-0-71/pytorch/default/1/seed_42_fcmf_model_best.pth'
+        best_path = f'/kaggle/input/best-iaog-fcmf-0-68/pytorch/default/1/seed_42_fcmf_model_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device, weights_only=False)
