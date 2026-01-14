@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,7 +23,7 @@ from torchvision.models import resnet152, ResNet152_Weights
 
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 from sklearn.metrics import precision_recall_fscore_support
-from ..text_preprocess import TextNormalize, convert_unicode
+from text_preprocess import TextNormalize, convert_unicode
 
 # ==============================================================================
 # 1. UTILS
