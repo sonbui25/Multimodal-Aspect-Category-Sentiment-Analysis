@@ -20,18 +20,7 @@ from torchvision.models import resnet152, ResNet152_Weights
 
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 from sklearn.metrics import precision_recall_fscore_support
-
-# --- IMPORT MODULE CÓ SẴN ---
-try:
-    from text_preprocess import TextNormalize, convert_unicode
-except ImportError:
-    # Fallback xử lý path nếu file để trong thư mục con
-    import sys
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    try:
-        from text_preprocess import TextNormalize, convert_unicode
-    except ImportError:
-        raise ImportError("Không tìm thấy module 'text_preprocess.py'. Hãy đặt file này cùng thư mục với text_preprocess.py")
+from ..text_preprocess import TextNormalize, convert_unicode
 
 # ==============================================================================
 # 1. UTILS
