@@ -1,8 +1,5 @@
 import os
-import re
 import json
-import math
-import copy
 import random
 import logging
 import argparse
@@ -24,34 +21,23 @@ from torchvision.models import resnet152, ResNet152_Weights
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 from sklearn.metrics import precision_recall_fscore_support
 
+# --- IMPORT MODULE CÓ SẴN ---
+try:
+    from text_preprocess import TextNormalize, convert_unicode
+except ImportError:
+    # Fallback xử lý path nếu file để trong thư mục con
+    import sys
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        from text_preprocess import TextNormalize, convert_unicode
+    except ImportError:
+        raise ImportError("Không tìm thấy module 'text_preprocess.py'. Hãy đặt file này cùng thư mục với text_preprocess.py")
+
 # ==============================================================================
-# 1. UTILS & PREPROCESSING
+# 1. UTILS
 # ==============================================================================
 
 POLARITY_MAP = {0: 'None', 1: 'Negative', 2: 'Neutral', 3: 'Positive'}
-
-class TextNormalize:
-    def normalize(self, text):
-        # Basic normalization for Vietnamese/English text
-        text = str(text).lower()
-        text = re.sub(r'(\w)\1+', r'\1', text)
-        text = re.sub(r"( )\1+", r'\1', text)
-        text = re.sub(r"[:)^@!`~%;?(\+\-\'\"]+", r'', text)
-        text = text.replace("“", "")
-        text = re.sub("(@[A-Za-z0-9]+)|(#[0-9A-Za-z]+)", "", text)
-        return text
-
-def convert_unicode(text):
-    char1252 = 'à|á|ả|ã|ạ|ầ|ấ|ẩ|ẫ|ậ|ằ|ắ|ẳ|ẵ|ặ|è|é|ẻ|ẽ|ẹ|ề|ế|ệ|ì|í|ỉ|ĩ|ị|ò|ó|ỏ|õ|ọ|ồ|ố|ổ|ỗ|ộ|ờ|ớ|ở|ỡ|ợ|ù|ú|ủ|ũ|ụ|ừ|ứ|ử|ữ|ự|ỳ|ý|ỷ|ỹ|ỵ|À|Á|Ả|Ã|Ạ|Ầ|Ấ|Ẩ|Ẫ|Ậ|Ằ|Ắ|Ẳ|Ẵ|Ặ|È|É|Ẻ|Ẽ|Ẹ|Ề|Ế|Ể|Ễ|Ệ|Ì|Í|Ỉ|Ĩ|Ị|Ò|Ó|Ỏ|Õ|Ọ|Ồ|Ố|Ổ|Ỗ|Ộ|Ờ|Ớ|Ở|Ỡ|Ợ|Ù|Ú|Ủ|Ũ|Ụ|Ừ|Ứ|Ử|Ữ|Ự|Ỳ|Ý|Ỷ|Ỹ|Ỵ'
-    charutf8 = 'à|á|ả|ã|ạ|ầ|ấ|ẩ|ẫ|ậ|ằ|ắ|ẳ|ẵ|ặ|è|é|ẻ|ẽ|ẹ|ề|ế|ể|ễ|ệ|ì|í|ỉ|ĩ|ị|ò|ó|ỏ|õ|ọ|ồ|ố|ổ|ỗ|ộ|ờ|ớ|ở|ỡ|ợ|ù|ú|ủ|ũ|ụ|ừ|ứ|ử|ữ|ự|ỳ|ý|ỷ|ỹ|ỵ|À|Á|Ả|Ã|Ạ|Ầ|Ấ|Ẩ|Ẫ|Ậ|Ằ|Ắ|Ẳ|Ẵ|Ặ|È|É|Ẻ|Ẽ|Ẹ|Ề|Ế|Ể|Ễ|Ệ|Ì|Í|Ỉ|Ĩ|Ị|Ò|Ó|Ỏ|Õ|Ọ|Ồ|Ố|Ổ|Ỗ|Ộ|Ờ|Ớ|Ở|Ỡ|Ợ|Ù|Ú|Ủ|Ũ|Ụ|Ừ|Ứ|Ử|Ữ|Ự|Ỳ|Ý|Ỷ|Ỹ|Ỵ'
-    char1252 = char1252.split('|')
-    charutf8 = charutf8.split('|')
-    dic = {}
-    for i in range(len(char1252)): dic[char1252[i]] = charutf8[i]
-    return re.sub(
-        r'à|á|ả|ã|ạ|ầ|ấ|ẩ|ẫ|ậ|ằ|ắ|ẳ|ẵ|ặ|è|é|ẻ|ẽ|ẹ|ề|ế|ể|ễ|ệ|ì|í|ỉ|ĩ|ị|ò|ó|ỏ|õ|ọ|ồ|ố|ổ|ỗ|ộ|ờ|ớ|ở|ỡ|ợ|ù|ú|ủ|ũ|ụ|ừ|ứ|ử|ữ|ự|ỳ|ý|ỷ|ỹ|ỵ|À|Á|Ả|Ã|Ạ|Ầ|Ấ|Ẩ|Ẫ|Ậ|Ằ|Ắ|Ẳ|Ẵ|Ặ|È|É|Ẻ|Ẽ|Ẹ|Ề|Ế|Ể|Ễ|Ệ|Ì|Í|Ỉ|Ĩ|Ị|Ò|Ó|Ỏ|Õ|Ọ|Ồ|Ố|Ổ|Ỗ|Ộ|Ờ|Ớ|Ở|Ỡ|Ợ|Ù|Ú|Ủ|Ũ|Ụ|Ừ|Ứ|Ử|Ữ|Ự|Ỳ|Ý|Ỷ|Ỹ|Ỵ',
-        lambda x: dic[x.group()], text
-    )
 
 def macro_f1(y_true, y_pred):
     p_macro, r_macro, f_macro, _ = precision_recall_fscore_support(y_true, y_pred, average='macro', zero_division=0.0)
@@ -68,10 +54,15 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0, scaler=
     torch.save(checkpoint_dict, path)
 
 # ==============================================================================
-# 2. DATASET (ViMACSA for TomBERT)
+# 2. DATASET (TomBERT Specific)
 # ==============================================================================
 
-class MACSADataset(Dataset):
+class TomBERTDataset(Dataset):
+    """
+    Dataset class dành riêng cho TomBERT.
+    Khác với FCMF, TomBERT cần tách biệt 'Target Input' và 'Sentence Input' 
+    để đưa vào 2 encoder riêng biệt trước khi fusion.
+    """
     def __init__(self, data, tokenizer, img_folder, roi_df, dict_image_aspect, dict_roi_aspect, num_img, num_roi):
         self.data = data
         self.ASPECT = ['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area']
@@ -98,8 +89,9 @@ class MACSADataset(Dataset):
         
         # --- Image Loading ---
         list_img_path = idx_data[1]
-        list_img_features, global_roi_features, global_roi_coor = [], [], []
+        list_img_features, global_roi_features = [], []
 
+        # Load Full Images
         for img_path in list_img_path[:self.num_img]:
             image_os_path = os.path.join(self.img_folder, img_path)
             try:
@@ -110,38 +102,36 @@ class MACSADataset(Dataset):
                 one_image = torch.zeros(3, 224, 224)
             list_img_features.append(img_transform)
             
+            # Load ROIs
             roi_in_img_df = self.roi_df[self.roi_df['file_name'] == img_path][:self.num_roi]
-            list_roi_img, list_roi_coor = [], []
+            list_roi_img = []
+            
             if roi_in_img_df.shape[0] == 0:
                 list_roi_img = np.zeros((self.num_roi, 3, 224, 224))
-                global_roi_coor.append(np.zeros((self.num_roi, 4)))
-                global_roi_features.append(list_roi_img)
-                continue
-            for i_roi in range(roi_in_img_df.shape[0]):
-                x1, x2, y1, y2 = roi_in_img_df.iloc[i_roi, 1:5].values
-                roi_in_image = one_image[:, x1:x2, y1:y2]
-                if roi_in_image.numel() == 0: roi_transform = torch.zeros(3, 224, 224).numpy()
-                else: roi_transform = self.transform(roi_in_image).numpy()
-                list_roi_coor.append([x/512 for x in [x1, x2, y1, y2]])
-                list_roi_img.append(roi_transform)
-            for _ in range(self.num_roi - len(list_roi_img)):
-                list_roi_img.append(np.zeros((3, 224, 224)))
-                list_roi_coor.append(np.zeros((4,)))
+            else:
+                for i_roi in range(roi_in_img_df.shape[0]):
+                    x1, x2, y1, y2 = roi_in_img_df.iloc[i_roi, 1:5].values
+                    roi_in_image = one_image[:, x1:x2, y1:y2]
+                    if roi_in_image.numel() == 0: roi_transform = torch.zeros(3, 224, 224).numpy()
+                    else: roi_transform = self.transform(roi_in_image).numpy()
+                    list_roi_img.append(roi_transform)
+                # Padding ROIs if not enough
+                for _ in range(self.num_roi - len(list_roi_img)):
+                    list_roi_img.append(np.zeros((3, 224, 224)))
+            
             global_roi_features.append(list_roi_img)
-            global_roi_coor.append(list_roi_coor)
 
+        # Padding Images if not enough
         t_img_features = torch.zeros((self.num_img, 3, 224, 224))
         for i in range(min(len(list_img_features), self.num_img)):
             t_img_features[i,:] = list_img_features[i]
+
         roi_img_features = np.zeros((self.num_img, self.num_roi, 3, 224, 224))
-        roi_coors = np.zeros((self.num_img, self.num_roi, 4))
         if len(global_roi_features) > 0:
             for i in range(min(len(global_roi_features), self.num_img)):
                 roi_img_features[i,:] = np.asarray(global_roi_features[i])
-                roi_coors[i,:] = np.asarray(global_roi_coor[i])
 
-        # --- Text Loading (TomBERT Requirements) ---
-        # Need separate inputs: Target (Aspect) and Sentence (Aspect + Context)
+        # --- Text Processing ---
         text_img_label = idx_data[3]
         list_aspect, list_polar = [], []
         for asp_pol in text_img_label:
@@ -156,7 +146,6 @@ class MACSADataset(Dataset):
                 list_aspect.append(asp)
                 list_polar.append('None')
 
-        # Accumulators for all 6 aspects
         out_tgt_ids, out_tgt_mask = [], []
         out_sent_ids, out_sent_mask = [], []
         out_labels = []
@@ -166,25 +155,21 @@ class MACSADataset(Dataset):
             if "_" in asp: asp = "Public area"
             idx_asp_in_list_asp = list_aspect.index(asp)
 
-            # 1. Target Input: Just the Aspect
-            # e.g. "Service"
+            # 1. Target Input: Aspect Only (e.g., "Service")
             target_text = asp.lower()
             tokenized_tgt = self.tokenizer(target_text, max_length=16, padding='max_length', truncation=True)
             
-            # 2. Sentence Input: Aspect [SEP] Text
-            # Standard TomBERT/ABSA format
+            # 2. Sentence Input: Aspect [SEP] Text (Standard ABSA format)
             sentence_text = f"{asp} </s></s> {text}".lower().replace('_', ' ')
             tokenized_sent = self.tokenizer(sentence_text, max_length=170, padding='max_length', truncation=True)
 
             out_tgt_ids.append(torch.tensor(tokenized_tgt['input_ids']))
             out_tgt_mask.append(torch.tensor(tokenized_tgt['attention_mask']))
-            
             out_sent_ids.append(torch.tensor(tokenized_sent['input_ids']))
             out_sent_mask.append(torch.tensor(tokenized_sent['attention_mask']))
-            
             out_labels.append(self.pola_to_num[list_polar[idx_asp_in_list_asp]])
 
-        return t_img_features, torch.tensor(roi_img_features), torch.tensor(roi_coors), \
+        return t_img_features, torch.tensor(roi_img_features), \
                torch.stack(out_tgt_ids), torch.stack(out_tgt_mask), \
                torch.stack(out_sent_ids), torch.stack(out_sent_mask), \
                torch.tensor(out_labels), text
@@ -194,11 +179,10 @@ class MACSADataset(Dataset):
 # ==============================================================================
 
 class myResNetImg(nn.Module):
-    def __init__(self, resnet, if_fine_tune, device):
+    def __init__(self, resnet, if_fine_tune):
         super(myResNetImg, self).__init__()
         self.resnet = resnet
         self.if_fine_tune = if_fine_tune
-        self.device = device
     def forward(self, x, att_size=7):
         x = self.resnet.conv1(x); x = self.resnet.bn1(x); x = self.resnet.relu(x); x = self.resnet.maxpool(x)
         x = self.resnet.layer1(x); x = self.resnet.layer2(x); x = self.resnet.layer3(x); x = self.resnet.layer4(x)
@@ -207,11 +191,10 @@ class myResNetImg(nn.Module):
         return att
 
 class myResNetRoI(nn.Module):
-    def __init__(self, resnet, if_fine_tune, device):
+    def __init__(self, resnet, if_fine_tune):
         super(myResNetRoI, self).__init__()
         self.resnet = resnet
         self.if_fine_tune = if_fine_tune
-        self.device = device
     def forward(self, x):
         x = self.resnet.conv1(x); x = self.resnet.bn1(x); x = self.resnet.relu(x); x = self.resnet.maxpool(x)
         x = self.resnet.layer1(x); x = self.resnet.layer2(x); x = self.resnet.layer3(x); x = self.resnet.layer4(x)
@@ -227,40 +210,28 @@ class TargetImageMatching(nn.Module):
         self.feed_forward = nn.Sequential(nn.Linear(hidden_size, hidden_size * 4), nn.GELU(), nn.Linear(hidden_size * 4, hidden_size), nn.Dropout(dropout))
         self.dropout = nn.Dropout(dropout)
     def forward(self, target_feats, image_feats):
-        # Query: Target Features, Key/Value: Image Features
         attn_out, _ = self.mha(query=target_feats, key=image_feats, value=image_feats)
         h_v = self.norm1(target_feats + self.dropout(attn_out))
         h_v = self.norm2(h_v + self.feed_forward(h_v))
         return h_v
 
 class TomBERT(nn.Module):
-    def __init__(self, pretrained_path, num_labels=4, num_imgs=7, num_roi=7):
+    def __init__(self, pretrained_path, num_labels=4):
         super(TomBERT, self).__init__()
-        # Backbone
         self.roberta = AutoModel.from_pretrained(pretrained_path)
         config = self.roberta.config
         self.hidden_size = config.hidden_size
         
-        # Visual Projection
         self.vis_projection = nn.Linear(2048, self.hidden_size)
         self.roi_projection = nn.Linear(2048, self.hidden_size)
         
-        # === BEST CONFIGURATION PARAMETERS (from Paper RQ3) ===
-        # L_t (TIM Layers) = 5
-        # L_m (Multimodal Layers) = 4
-        L_t = 5 
-        L_m = 4
-        
-        # Target-Image Matching (TIM)
-        self.ti_matching = nn.ModuleList([TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) for _ in range(L_t)])
-        
-        # Multimodal Encoder (ME)
+        # Best Config: L_t=5, L_m=4
+        self.ti_matching = nn.ModuleList([TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) for _ in range(5)])
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_size, nhead=config.num_attention_heads, dim_feedforward=config.intermediate_size, dropout=config.hidden_dropout_prob, activation="gelu", batch_first=True)
-        self.mm_encoder = nn.TransformerEncoder(encoder_layer, num_layers=L_m)
+        self.mm_encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
         
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        # Input to classifier is hidden_size * 2 because of "BOTH" pooling
-        self.classifier = nn.Linear(self.hidden_size * 2, num_labels)
+        self.classifier = nn.Linear(self.hidden_size * 2, num_labels) # *2 for BOTH pooling
         
         self.apply_custom_init(self.classifier); self.apply_custom_init(self.vis_projection); self.apply_custom_init(self.roi_projection)
 
@@ -273,35 +244,23 @@ class TomBERT(nn.Module):
     def apply_custom_init(self, module): module.apply(self._init_weights)
 
     def forward(self, target_ids, target_mask, sentence_ids, sentence_mask, visual_embeds_att, roi_embeds_att):
-        # 1. Target Encoder (H_T)
         t_out = self.roberta(target_ids, attention_mask=target_mask)
-        h_t = t_out.last_hidden_state # [Batch, M, Hidden]
-        
-        # 2. Sentence Encoder (H_S)
+        h_t = t_out.last_hidden_state
         s_out = self.roberta(sentence_ids, attention_mask=sentence_mask)
-        h_s = s_out.last_hidden_state # [Batch, N, Hidden]
+        h_s = s_out.last_hidden_state
 
-        # 3. Visual Features (G)
         B, N_Img, Patches, Dim = visual_embeds_att.shape; _, _, N_Roi, _ = roi_embeds_att.shape
         vis_flat = visual_embeds_att.view(B, N_Img * Patches, Dim); roi_flat = roi_embeds_att.view(B, N_Img * N_Roi, Dim)
         vis_proj = self.vis_projection(vis_flat); roi_proj = self.roi_projection(roi_flat)
         g_visual = torch.cat([vis_proj, roi_proj], dim=1)
         
-        # 4. Target-Image Matching (TIM) -> H_V
-        # Aligns Image to Target
         h_v = h_t
         for layer in self.ti_matching: h_v = layer(target_feats=h_v, image_feats=g_visual)
         
-        # 5. Multimodal Encoder with "First-Text" Concatenation
-        # Take H_V[0] (Visual-enhanced Target CLS)
-        h_v_cls = h_v[:, 0:1, :] # [Batch, 1, Hidden]
+        # Multimodal Encoder with First-Text Concatenation
+        h_v_cls = h_v[:, 0:1, :]
+        mm_input = torch.cat([h_v_cls, h_s], dim=1)
         
-        # Concatenate: [H_V_CLS; H_S]
-        mm_input = torch.cat([h_v_cls, h_s], dim=1) # [Batch, 1+N, Hidden]
-        
-        # Adjust Mask: Add 1 token (valid) for H_V_CLS
-        # Note: PyTorch Transformer expects mask where True = Padding (Ignored).
-        # Sentence mask is 1=Valid, 0=Pad.
         bsz = sentence_mask.size(0)
         valid_cls = torch.ones(bsz, 1).to(sentence_mask.device)
         mm_mask = torch.cat([valid_cls, sentence_mask], dim=1)
@@ -309,20 +268,15 @@ class TomBERT(nn.Module):
         
         h_mm = self.mm_encoder(mm_input, src_key_padding_mask=src_key_padding_mask)
         
-        # 6. "BOTH" Pooling
-        # Index 0 is H_V_CLS output (Visual-aware)
-        # Index 1 is H_S_CLS output (Sentence-aware, since H_S starts with CLS)
+        # BOTH Pooling
         out_vis = h_mm[:, 0, :]
         out_txt = h_mm[:, 1, :]
-        
         pooled_output = torch.cat([out_vis, out_txt], dim=1)
-        pooled_output = self.dropout(pooled_output)
-        
-        logits = self.classifier(pooled_output)
+        logits = self.classifier(self.dropout(pooled_output))
         return logits
 
 # ==============================================================================
-# 4. MAIN LOOP
+# 4. MAIN
 # ==============================================================================
 
 def main():
@@ -333,7 +287,7 @@ def main():
     parser.add_argument("--pretrained_hf_model", default="xlm-roberta-base", type=str)
     parser.add_argument("--list_aspect", default=['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area'], nargs='+')
     parser.add_argument("--num_polarity", default=4, type=int)
-    parser.add_argument("--num_imgs", default=3, type=int, help="Number of images per sample (Paper uses ~3)")
+    parser.add_argument("--num_imgs", default=3, type=int)
     parser.add_argument("--num_rois", default=7, type=int)
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
@@ -354,35 +308,41 @@ def main():
     else: device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     os.makedirs(args.output_dir, exist_ok=True)
-    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO, handlers=[logging.FileHandler(f'{args.output_dir}/training_tombert_best.log'), logging.StreamHandler()])
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO, handlers=[logging.FileHandler(f'{args.output_dir}/training_tombert.log'), logging.StreamHandler()])
     logger = logging.getLogger(__name__)
     
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
-    normalize_class = TextNormalize()
+    normalize_class = TextNormalize() # Sử dụng từ module import
     ASPECT = args.list_aspect
 
     roi_df = pd.read_csv(f"{args.data_dir}/roi_data.csv"); roi_df['file_name'] = roi_df['file_name'] + '.png'
     with open(f'{args.data_dir}/resnet152_image_label.json') as imf: dict_image_aspect = json.load(imf)
     with open(f'{args.data_dir}/resnet152_roi_label.json') as rf: dict_roi_aspect = json.load(rf)
 
+    # --- Load Data ---
     if args.do_train:
         train_data = pd.read_json(f'{args.data_dir}/train.json')
         dev_data = pd.read_json(f'{args.data_dir}/dev.json')
+        # Sử dụng hàm từ text_preprocess
         train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
         dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
-        train_dataset = MACSADataset(train_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
-        dev_dataset = MACSADataset(dev_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
+        
+        train_dataset = TomBERTDataset(train_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
+        dev_dataset = TomBERTDataset(dev_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
 
-    model = TomBERT(pretrained_path=args.pretrained_hf_model, num_labels=args.num_polarity, num_imgs=args.num_imgs, num_roi=args.num_rois)
+    # --- Setup Models ---
+    model = TomBERT(pretrained_path=args.pretrained_hf_model, num_labels=args.num_polarity)
     model.to(device)
+    
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
     roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
-    resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
-    resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn, device=device)
+    resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn).to(device)
+    resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn).to(device)
 
+    # --- Optimizer ---
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [{'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01}, {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
@@ -401,7 +361,7 @@ def main():
         optimizer.load_state_dict(ckpt['optimizer_state_dict']); scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_epoch = ckpt['epoch'] + 1; max_f1 = ckpt.get('best_score', 0.0)
 
-    # --- TRAINING LOOP ---
+    # --- TRAINING ---
     if args.do_train:
         train_loader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), batch_size=args.train_batch_size)
         dev_loader = DataLoader(dev_dataset, sampler=SequentialSampler(dev_dataset), batch_size=args.eval_batch_size)
@@ -410,7 +370,7 @@ def main():
             model.train(); resnet_img.train(); resnet_roi.train()
             for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}")):
                 batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
-                t_img, roi_img, roi_coor, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
+                t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                 roi_img = roi_img.float()
 
                 with autocast(enabled=args.fp16):
@@ -440,7 +400,7 @@ def main():
                 with torch.no_grad():
                     for batch in tqdm(dev_loader, desc="Dev Eval"):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
-                        t_img, roi_img, roi_coor, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
+                        t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                         roi_img = roi_img.float()
                         encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
                         encoded_roi = [torch.stack([resnet_roi(roi_img[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
@@ -463,12 +423,12 @@ def main():
                     max_f1 = avg_f1
                     save_model(f'{args.output_dir}/tombert_best.pth', model, optimizer, scheduler, epoch, max_f1, scaler)
 
-    # --- TEST EVALUATION ---
+    # --- TEST ---
     if args.do_eval:
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
         test_data = pd.read_json(f'{args.data_dir}/test.json')
         test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
-        test_dataset = MACSADataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
+        test_dataset = TomBERTDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_loader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
         best_path = f'{args.output_dir}/tombert_best.pth'
@@ -487,7 +447,7 @@ def main():
             for batch in tqdm(test_loader, desc="Testing"):
                 batch_texts = batch[-1]
                 batch_tensors = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch[:-1])
-                t_img, roi_img, roi_coor, tgt_ids, tgt_mask, sent_ids, sent_mask, labels = batch_tensors
+                t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels = batch_tensors
                 roi_img = roi_img.float()
 
                 encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
@@ -511,6 +471,7 @@ def main():
                 
                 formatted_results.extend(batch_logs)
 
+        # Save Metrics
         with open(os.path.join(args.output_dir, "test_results_tombert.txt"), "w") as writer:
             writer.write("***** Test results *****\n")
             all_f1 = 0
@@ -520,11 +481,11 @@ def main():
                 p, r, f1 = macro_f1(tr, pr)
                 all_f1 += f1
                 writer.write(f"{asp} - P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}\n")
-                logger.info(f"{asp} - F1: {f1:.4f}")
             avg_f1 = all_f1 / len(ASPECT)
             writer.write(f"Average F1: {avg_f1:.4f}\n")
-            logger.info(f"Average F1: {avg_f1:.4f}")
+            logger.info(f"Test Average F1: {avg_f1:.4f}")
 
+        # Save Logs
         with open(f"{args.output_dir}/test_predictions_formatted.txt", "w", encoding="utf-8") as f:
             f.write(f"TEST DETAILED PREDICTIONS\nAverage Macro F1: {avg_f1:.4f}\n{'='*50}\n\n")
             for i, sample in enumerate(formatted_results):
@@ -534,7 +495,7 @@ def main():
                     res = sample['aspects'].get(asp, {'predict': 'N/A', 'label': 'N/A'})
                     f.write(f"   {asp}: Predict: {res['predict']}, Label: {res['label']}\n")
                 f.write("}\n")
-        logger.info(f"Formatted predictions saved to {args.output_dir}/test_predictions_formatted.txt")
+        logger.info(f"Saved predictions to {args.output_dir}")
 
 if __name__ == '__main__':
     main()
