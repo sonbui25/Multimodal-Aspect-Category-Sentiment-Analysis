@@ -28,15 +28,13 @@ from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warm
 from sklearn.metrics import precision_recall_fscore_support
 from text_preprocess import TextNormalize, convert_unicode
 
-# Setup logging formatting like FCMF
+# ==============================================================================
+# 1. SETUP LOGGING (MATCHING FCMF STYLE)
+# ==============================================================================
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ==============================================================================
-# 1. HELPER FUNCTIONS
-# ==============================================================================
 
 POLARITY_MAP = {0: 'None', 1: 'Negative', 2: 'Neutral', 3: 'Positive'}
 
@@ -46,24 +44,25 @@ def macro_f1(y_true, y_pred):
     )
     return p_macro, r_macro, f_macro
 
-def save_model(args, model, tokenizer, optimizer, scheduler, best_score):
-    # Save model checkpoint consistent with FCMF style
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-    
-    model_to_save = model.module if hasattr(model, 'module') else model
-    
-    # Save dict for consistency
-    output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
-    torch.save(model_to_save.state_dict(), output_model_file)
-    
-    # Save training arguments and critical info
-    torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
-    
-    logger.info(f"Saved model checkpoint to {args.output_dir}")
+def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0, scaler=None):
+    if hasattr(model, 'module'): 
+        model_state = model.module.state_dict()
+    else: 
+        model_state = model.state_dict()
+        
+    checkpoint_dict = {
+        "epoch": epoch, 
+        "best_score": best_score, 
+        "model_state_dict": model_state,
+        "optimizer_state_dict": optimizer.state_dict(), 
+        "scheduler_state_dict": scheduler.state_dict(),
+    }
+    if scaler is not None: 
+        checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
+    torch.save(checkpoint_dict, path)
 
 # ==============================================================================
-# 2. DATASET CLASS (TomBERT Input Logic)
+# 2. DATASET
 # ==============================================================================
 
 class TomBERTDataset(Dataset):
@@ -92,7 +91,7 @@ class TomBERTDataset(Dataset):
         text = str(row['comment'])
         list_img_path = row['list_img']
         
-        # --- 1. IMAGE PROCESSING ---
+        # --- Image ---
         list_img_features = []
         global_roi_features = []
 
@@ -108,13 +107,11 @@ class TomBERTDataset(Dataset):
             except:
                 img_tensor = torch.zeros(1, 3, 224, 224)
                 one_image = torch.zeros(3, 224, 224)
-            
             list_img_features.append(img_tensor)
             
             # ROI
             current_rois = self.roi_df[self.roi_df['file_name'] == img_path].head(self.num_roi)
             list_roi_img = []
-            
             if not current_rois.empty and one_image.shape[0] == 3:
                 for _, roi_row in current_rois.iterrows():
                     try:
@@ -137,35 +134,25 @@ class TomBERTDataset(Dataset):
         for i in range(min(len(global_roi_features), self.num_img)):
             roi_img_features[i] = np.array(global_roi_features[i])
 
-        # --- 2. TEXT PROCESSING ---
+        # --- Text ---
         text_img_label = row.get('text_img_label', []) + row.get('text_label', [])
         labels_map = {asp: 0 for asp in self.ASPECT}
-        
         for item in text_img_label:
             if '#' in item:
                 parts = item.split('#')
                 if len(parts) == 2:
                     asp, pol = parts
                     if "_" in asp: asp = "Public_area"
-                    if asp in labels_map:
-                        labels_map[asp] = self.pola_to_num.get(pol, 0)
+                    if asp in labels_map: labels_map[asp] = self.pola_to_num.get(pol, 0)
 
-        out_tgt_ids, out_tgt_mask = [], []
-        out_sent_ids, out_sent_mask = [], []
-        out_labels = []
+        out_tgt_ids, out_tgt_mask, out_sent_ids, out_sent_mask, out_labels = [], [], [], [], []
 
         for aspect in self.ASPECT:
             target_text = aspect.replace('_', ' ').lower()
             enc_tgt = self.tokenizer(target_text, max_length=16, padding='max_length', truncation=True)
             
             clean_review = text.replace('_', ' ').lower()
-            enc_sent = self.tokenizer(
-                text=clean_review, 
-                text_pair=target_text,
-                max_length=256, 
-                padding='max_length', 
-                truncation=True
-            )
+            enc_sent = self.tokenizer(text=clean_review, text_pair=target_text, max_length=256, padding='max_length', truncation=True)
 
             out_tgt_ids.append(torch.tensor(enc_tgt['input_ids']))
             out_tgt_mask.append(torch.tensor(enc_tgt['attention_mask']))
@@ -176,16 +163,14 @@ class TomBERTDataset(Dataset):
         return (
             t_img_features, 
             torch.tensor(roi_img_features, dtype=torch.float32),
-            torch.stack(out_tgt_ids), 
-            torch.stack(out_tgt_mask),
-            torch.stack(out_sent_ids), 
-            torch.stack(out_sent_mask),
+            torch.stack(out_tgt_ids), torch.stack(out_tgt_mask),
+            torch.stack(out_sent_ids), torch.stack(out_sent_mask),
             torch.tensor(out_labels, dtype=torch.long), 
             text
         )
 
 # ==============================================================================
-# 3. MODELS (Strict TomBERT Architecture)
+# 3. MODELS
 # ==============================================================================
 
 class BERTLikePooler(nn.Module):
@@ -194,8 +179,7 @@ class BERTLikePooler(nn.Module):
         self.dense = nn.Linear(hidden_size, hidden_size)
         self.activation = nn.Tanh()
     def forward(self, hidden_states):
-        first_token = hidden_states[:, 0]
-        return self.activation(self.dense(first_token))
+        return self.activation(self.dense(hidden_states[:, 0]))
 
 class TargetImageMatching(nn.Module):
     def __init__(self, hidden_size, num_heads, dropout=0.1):
@@ -284,50 +268,55 @@ class myResNetRoI(nn.Module):
         return fc
 
 # ==============================================================================
-# 4. MAIN (Matching FCMF Setup)
+# 4. MAIN
 # ==============================================================================
 
 def main():
     parser = argparse.ArgumentParser()
-    # Required parameters
+    # Paths
     parser.add_argument("--data_dir", default='../vimacsa', type=str, required=True)
     parser.add_argument("--output_dir", default=None, type=str, required=True)
     parser.add_argument('--image_dir', default='../vimacsa/image')
-    
-    # Model parameters
     parser.add_argument("--pretrained_hf_model", default="xlm-roberta-base", type=str)
     
-    # Arguments consistent with your run command
+    # Args from FCMF
     parser.add_argument("--list_aspect", default=['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area'], nargs='+')
     parser.add_argument("--num_polarity", default=4, type=int)
     parser.add_argument("--num_imgs", default=3, type=int)
     parser.add_argument("--num_rois", default=7, type=int)
-    parser.add_argument("--warmup_proportion", default=0.1, type=float)
     
-    # Training parameters
+    # Training Params
     parser.add_argument("--num_train_epochs", default=10.0, type=float)
     parser.add_argument("--train_batch_size", default=8, type=int)
     parser.add_argument("--eval_batch_size", default=8, type=int)
     parser.add_argument("--learning_rate", default=2e-5, type=float)
+    parser.add_argument("--warmup_proportion", default=0.1, type=float)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--fp16', action='store_true')
+    parser.add_argument('--fine_tune_cnn', action='store_true')
+    
+    # Actions
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
-    parser.add_argument('--fine_tune_cnn', action='store_true')
+    parser.add_argument("--no_cuda", action='store_true')
     
     args = parser.parse_args()
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.device = device # Set for global access if needed
+    # Setup Device & Logging like FCMF
+    if args.no_cuda:
+        device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+    print(f"Running on device:{device}")
     
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
         
-    # Setup logging
     logger.info("***** Running training *****")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per GPU = {args.train_batch_size}")
+    logger.info(f"  Batch size = {args.train_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -350,7 +339,7 @@ def main():
     resnet_img = myResNetImg(img_res_model, args.fine_tune_cnn).to(device)
     resnet_roi = myResNetRoI(roi_res_model, args.fine_tune_cnn).to(device)
 
-    # Train
+    # Train Loop
     if args.do_train:
         train_df = pd.read_json(os.path.join(args.data_dir, 'train.json'))
         dev_df = pd.read_json(os.path.join(args.data_dir, 'dev.json'))
@@ -364,27 +353,21 @@ def main():
         train_loader = DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
         dev_loader = DataLoader(dev_dataset, batch_size=args.eval_batch_size, shuffle=False)
         
-        logger.info(f"  Total optimization steps = {len(train_loader) // args.gradient_accumulation_steps * args.num_train_epochs}")
-        
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-        t_total = len(train_loader) // args.gradient_accumulation_steps * args.num_train_epochs
-        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(args.warmup_proportion*t_total), num_training_steps=t_total)
+        
+        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps * args.warmup_proportion), num_training_steps=num_train_steps)
         scaler = GradScaler() if args.fp16 else None
         criterion = nn.CrossEntropyLoss()
         
         best_f1 = 0.0
-        global_step = 0
-        tr_loss = 0.0
         
-        model.zero_grad()
-        
-        train_iterator = trange(int(args.num_train_epochs), desc="Epoch")
-        
-        for epoch in train_iterator:
+        for epoch in range(int(args.num_train_epochs)):
+            logger.info(f"********** Epoch: {epoch} **********")
             model.train(); resnet_img.train(); resnet_roi.train()
-            epoch_iterator = tqdm(train_loader, desc="Iteration", leave=False)
             
-            for step, batch in enumerate(epoch_iterator):
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}", dynamic_ncols=True)
+            for step, batch in enumerate(pbar):
                 t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                 t_img = t_img.to(device); roi_img = roi_img.to(device).float()
                 tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
@@ -405,37 +388,30 @@ def main():
                     for asp_idx in range(len(args.list_aspect)):
                         logits = model(tgt_ids[:, asp_idx], tgt_mask[:, asp_idx], sent_ids[:, asp_idx], sent_mask[:, asp_idx], vis_embeds, roi_embeds)
                         loss += criterion(logits, labels[:, asp_idx])
-                    
-                    # Gradient Accumulation Logic mimicking FCMF
-                    if args.gradient_accumulation_steps > 1:
-                        loss = loss / args.gradient_accumulation_steps
+                    loss = loss / args.gradient_accumulation_steps
                 
                 if args.fp16:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
-                
-                tr_loss += loss.item()
-                
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    if args.fp16:
-                        scaler.step(optimizer); scaler.update()
-                    else:
-                        optimizer.step()
-                    scheduler.step()
-                    model.zero_grad()
-                    global_step += 1
                     
-                    # Optional: Log training loss like FCMF if needed
+                if (step + 1) % args.gradient_accumulation_steps == 0:
+                    if args.fp16: scaler.step(optimizer); scaler.update()
+                    else: optimizer.step()
+                    optimizer.zero_grad(); scheduler.step()
+                
+                pbar.set_postfix({'loss': loss.item() * args.gradient_accumulation_steps})
             
-            # --- EVALUATION ON DEV ---
-            logger.info("\n***** Running evaluation on Dev Set *****")
+            logger.info(f"--> Epoch {epoch} Completed.")
+            
+            # Eval
+            logger.info("***** Running evaluation on Dev Set *****")
             model.eval(); resnet_img.eval(); resnet_roi.eval()
             true_labels = {asp: [] for asp in args.list_aspect}
             pred_labels = {asp: [] for asp in args.list_aspect}
             
             with torch.no_grad():
-                for batch in tqdm(dev_loader, desc="Eval"):
+                for batch in tqdm(dev_loader, leave=False):
                     t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                     t_img = t_img.to(device); roi_img = roi_img.to(device).float()
                     tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
@@ -457,32 +433,24 @@ def main():
             
             f1_scores = [macro_f1(true_labels[asp], pred_labels[asp])[2] for asp in args.list_aspect]
             avg_f1 = np.mean(f1_scores)
-            
-            logger.info(f"Epoch {epoch} - Dev Macro F1: {avg_f1:.4f}")
+            logger.info(f"  Dev Macro-F1: {avg_f1}")
             
             if avg_f1 > best_f1:
                 best_f1 = avg_f1
-                # Format message specifically as requested
-                logger.info(f"\n>> New Best Model found at Epoch {epoch} with F1: {best_f1:.4f}")
-                save_model(args, model, tokenizer, optimizer, scheduler, best_f1)
-                logger.info(f">> Best Model saved to {args.output_dir}\n")
+                logger.info(f"  New Best F1 ({best_f1:.4f})! Saving best model...")
+                save_model(os.path.join(args.output_dir, 'tombert_best.pth'), model, optimizer, scheduler, epoch, best_f1, scaler)
 
-    # --- TEST ---
+    # Test Loop
     if args.do_eval:
-        logger.info("\n***** Running evaluation on Test Set *****")
-        
-        # Load best model
-        output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
-        if os.path.exists(output_model_file):
-            checkpoint = torch.load(output_model_file, map_location=device)
-            if hasattr(model, 'module'):
-                model.module.load_state_dict(checkpoint)
-            else:
-                model.load_state_dict(checkpoint)
-            logger.info(f"Loaded best model from {output_model_file}")
+        logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
+        best_path = os.path.join(args.output_dir, 'tombert_best.pth')
+        if os.path.exists(best_path):
+            logger.info(f"Loading Best Checkpoint from: {best_path}")
+            checkpoint = torch.load(best_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
         else:
-            logger.warning("No best model checkpoint found. Using current weights.")
-
+            logger.warning("No best model found! Using current weights.")
+            
         test_df = pd.read_json(os.path.join(args.data_dir, 'test.json'))
         test_df['comment'] = test_df['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
         test_dataset = TomBERTDataset(test_df, tokenizer, args.image_dir, roi_df, args.list_aspect, args.num_imgs, args.num_rois)
@@ -491,12 +459,11 @@ def main():
         model.eval(); resnet_img.eval(); resnet_roi.eval()
         test_true = {asp: [] for asp in args.list_aspect}
         test_pred = {asp: [] for asp in args.list_aspect}
-        
         formatted_results = []
         
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Testing"):
-                t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, batch_text = batch
+                t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, batch_texts = batch
                 t_img = t_img.to(device); roi_img = roi_img.to(device).float()
                 tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
                 sent_ids = sent_ids.to(device); sent_mask = sent_mask.to(device)
@@ -509,50 +476,36 @@ def main():
                     encoded_roi.append(torch.stack(rois_in_img, dim=1))
                 roi_embeds = torch.stack(encoded_roi, dim=1)
                 
-                # For logging
-                batch_preds_dict = [{} for _ in range(len(batch_text))]
+                batch_logs = [{"text": t, "aspects": {}} for t in batch_texts]
                 
                 for asp_idx, asp_name in enumerate(args.list_aspect):
                     logits = model(tgt_ids[:, asp_idx], tgt_mask[:, asp_idx], sent_ids[:, asp_idx], sent_mask[:, asp_idx], vis_embeds, roi_embeds)
                     preds = torch.argmax(logits, dim=1).cpu().numpy()
-                    
                     test_true[asp_name].extend(labels[:, asp_idx].numpy())
                     test_pred[asp_name].extend(preds)
                     
                     for i, (p, l) in enumerate(zip(preds, labels[:, asp_idx].numpy())):
-                        batch_preds_dict[i][asp_name] = {
-                            "predict": POLARITY_MAP[p],
-                            "label": POLARITY_MAP[l]
-                        }
+                        batch_logs[i]["aspects"][asp_name] = {"predict": POLARITY_MAP[p], "label": POLARITY_MAP[l]}
                 
-                for i, text in enumerate(batch_text):
-                    formatted_results.append({
-                        "text": text,
-                        "aspects": batch_preds_dict[i]
-                    })
-
-        # Calculate Results
-        result_str = "\n***** Test Results *****\n"
-        avg_f1 = 0
-        for asp in args.list_aspect:
-            p, r, f1 = macro_f1(test_true[asp], test_pred[asp])
-            avg_f1 += f1
-            result_str += f"{asp:<15} | F1: {f1:.4f} | P: {p:.4f} | R: {r:.4f}\n"
+                formatted_results.extend(batch_logs)
         
-        avg_f1 /= len(args.list_aspect)
-        result_str += "-"*40 + f"\nAVERAGE MACRO F1: {avg_f1:.4f}\n"
-        
-        logger.info(result_str)
-        
+        # Save results
         with open(os.path.join(args.output_dir, 'test_results.txt'), 'w') as f:
-            f.write(result_str)
+            f.write("***** Test results *****\n")
+            all_f1 = 0
+            for asp in args.list_aspect:
+                p, r, f1 = macro_f1(test_true[asp], test_pred[asp])
+                all_f1 += f1
+                msg = f"{asp} - P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}"
+                f.write(msg + "\n"); logger.info(msg)
             
-        # Save Formatted Log (FCMF Style)
+            avg_f1 = all_f1 / len(args.list_aspect)
+            f.write(f"Average F1: {avg_f1:.4f}\n"); logger.info(f"Average F1: {avg_f1:.4f}")
+
+        # Formatted detailed log
         log_path = os.path.join(args.output_dir, "test_predictions_formatted.txt")
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"TEST DETAILED PREDICTIONS\n")
-            f.write(f"Average Macro F1: {avg_f1:.4f}\n")
-            f.write("="*50 + "\n\n")
+            f.write(f"TEST DETAILED PREDICTIONS\nAverage Macro F1: {avg_f1:.4f}\n{'='*50}\n\n")
             for i, sample in enumerate(formatted_results):
                 f.write("{\n")
                 f.write(f"Sentence {i}: {sample['text']}\n")
@@ -560,7 +513,7 @@ def main():
                     res = sample['aspects'].get(asp, {'predict': 'N/A', 'label': 'N/A'})
                     f.write(f"   {asp}: Predict: {res['predict']}, Label: {res['label']}\n")
                 f.write("}\n")
-        logger.info(f"Detailed predictions saved to {log_path}")
+        logger.info(f"Formatted predictions saved to {log_path}")
 
 if __name__ == '__main__':
     main()
