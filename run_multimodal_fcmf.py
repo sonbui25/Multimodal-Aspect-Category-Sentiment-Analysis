@@ -242,48 +242,59 @@ def main():
     # 4. OPTIMIZER & SCHEDULER
     
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    encoder_params = []
-    head_params = []
-    head_names = ['classifier', 'text_pooler'] 
+    # encoder_params = []
+    # head_params = []
+    # head_names = ['classifier', 'text_pooler'] 
     
-    for n, p in model.named_parameters():
-        # Chỉ lấy những tham số nào được phép train (requires_grad=True)
-        if not p.requires_grad:
-            continue
+    # for n, p in model.named_parameters():
+    #     # Chỉ lấy những tham số nào được phép train (requires_grad=True)
+    #     if not p.requires_grad:
+    #         continue
 
-        if any(nd in n for nd in head_names):
-            head_params.append((n, p))
-        else:
-            encoder_params.append((n, p))
+    #     if any(nd in n for nd in head_names):
+    #         head_params.append((n, p))
+    #     else:
+    #         encoder_params.append((n, p))
 
     # (Phần optimizer_grouped_parameters phía sau giữ nguyên, vì list params giờ đã sạch)
-    optimizer_grouped_parameters = [
-        {
-            'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
-            'weight_decay': 0.01,
-            'lr': args.encoder_learning_rate 
-        },
-        {
-            'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
-            'weight_decay': 0.0,
-            'lr': args.encoder_learning_rate
-        },
-        # Head Group: Higher LR
-        {
-            'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)], # For weights
-            'weight_decay': 0.01,
-            'lr': args.classifier_head_learning_rate 
-        },
-        {
-            'params': [p for n, p in head_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
-            'weight_decay': 0.0,
-            'lr': args.classifier_head_learning_rate
-        }
-    ]
+    # optimizer_grouped_parameters = [
+    #     {
+    #         'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
+    #         'weight_decay': 0.01,
+    #         'lr': args.encoder_learning_rate 
+    #     },
+    #     {
+    #         'params': [p for n, p in encoder_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
+    #         'weight_decay': 0.0,
+    #         'lr': args.encoder_learning_rate
+    #     },
+    #     # Head Group: Higher LR
+    #     {
+    #         'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)], # For weights
+    #         'weight_decay': 0.01,
+    #         'lr': args.classifier_head_learning_rate 
+    #     },
+    #     {
+    #         'params': [p for n, p in head_params if any(nd in n for nd in no_decay)], # For bias and LayerNorm
+    #         'weight_decay': 0.0,
+    #         'lr': args.classifier_head_learning_rate
+    #     }
+    # ]
 
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.classifier_head_learning_rate)
+    # optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.classifier_head_learning_rate)
+    # Lấy TOÀN BỘ tham số mô hình (bao gồm cả encoder và head)
+    param_optimizer = list(model.named_parameters()) 
+
+    # Không chia tách encoder_params hay head_params nữa
+    optimizer_grouped_parameters = [
+        # Nhóm 1: Có Weight Decay (cho tất cả Layer)
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+        # Nhóm 2: Không Weight Decay (cho bias, LayerNorm)
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
     criterion = torch.nn.CrossEntropyLoss()
-    
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.classifier_head_learning_rate)
+
     if args.fp16:
         scaler = GradScaler()
     else:
