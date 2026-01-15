@@ -141,7 +141,7 @@ class TomBERTDataset(Dataset):
             target_text = asp.lower()
             tokenized_tgt = self.tokenizer(target_text, max_length=16, padding='max_length', truncation=True)
             
-            # Sentence: Aspect [SEP] Text
+            # Sentence: Aspect [SEP] Text (TomBERT Standard Format)
             sentence_text = f"{asp} </s></s> {text}".lower().replace('_', ' ')
             tokenized_sent = self.tokenizer(sentence_text, max_length=170, padding='max_length', truncation=True)
 
@@ -157,7 +157,7 @@ class TomBERTDataset(Dataset):
                torch.tensor(out_labels), text
 
 # ==============================================================================
-# 3. MODELS (TomBERT)
+# 3. MODELS (TomBERT - Corrected Architecture)
 # ==============================================================================
 
 class myResNetImg(nn.Module):
@@ -185,6 +185,9 @@ class myResNetRoI(nn.Module):
         return fc
 
 class TargetImageMatching(nn.Module):
+    """
+    Standard Cross-Attention Block similar to BertCrossAttentionLayer + Intermeditate
+    """
     def __init__(self, hidden_size, num_heads, dropout=0.1):
         super(TargetImageMatching, self).__init__()
         self.mha = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, dropout=dropout, batch_first=True)
@@ -207,10 +210,18 @@ class TomBERT(nn.Module):
         self.vis_projection = nn.Linear(2048, self.hidden_size)
         self.roi_projection = nn.Linear(2048, self.hidden_size)
         
-        # Best Config: L_t=5, L_m=4
-        self.ti_matching = nn.ModuleList([TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) for _ in range(5)])
+        # --- [MODIFICATION FOR FAIRNESS] ---
+        # Original TomBERT uses: 
+        #   1. BertCrossEncoder (1 layer) 
+        #   2. MultimodalEncoder (1 layer)
+        # Previous version used 5 layers and 4 layers respectively.
+        
+        # 1. Target-Image Matching (Cross-Attention) -> Reduced to 1 Layer
+        self.ti_matching = nn.ModuleList([TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) for _ in range(1)])
+        
+        # 2. Multimodal Encoder (Fusion) -> Reduced to 1 Layer
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_size, nhead=config.num_attention_heads, dim_feedforward=config.intermediate_size, dropout=config.hidden_dropout_prob, activation="gelu", batch_first=True)
-        self.mm_encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
+        self.mm_encoder = nn.TransformerEncoder(encoder_layer, num_layers=1)
         
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(self.hidden_size * 2, num_labels)
@@ -240,7 +251,8 @@ class TomBERT(nn.Module):
         for layer in self.ti_matching: h_v = layer(target_feats=h_v, image_feats=g_visual)
         
         # Multimodal Encoder
-        h_v_cls = h_v[:, 0:1, :]
+        # Use first token (CLS) of Aspect-Image cross attention
+        h_v_cls = h_v[:, 0:1, :] 
         mm_input = torch.cat([h_v_cls, h_s], dim=1)
         
         bsz = sentence_mask.size(0)
@@ -292,11 +304,9 @@ def main():
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO, handlers=[logging.FileHandler(f'{args.output_dir}/training_tombert.log'), logging.StreamHandler()])
     logger = logging.getLogger(__name__)
     
-    # [CRITICAL UPDATE] Điều chỉnh batch size theo gradient accumulation
     if args.gradient_accumulation_steps < 1:
         raise ValueError(f"Invalid gradient_accumulation_steps parameter: {args.gradient_accumulation_steps}, should be >= 1")
     
-    # Chia batch size ngay từ đầu để effective batch size đúng bằng train_batch_size
     args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -337,9 +347,6 @@ def main():
     criterion = torch.nn.CrossEntropyLoss()
     scaler = GradScaler() if args.fp16 else None
     
-    # Số bước train được tính dựa trên batch size ĐÃ CHIA (tức là số bước thực tế của loader) chia cho gradient accumulation
-    # Tuy nhiên, do ta đã chia args.train_batch_size ở trên rồi, nên train_loader sẽ dài gấp gradient_accumulation_steps lần.
-    # Vì vậy tổng số bước cập nhật optimizer vẫn là: len(loader) / gradient_accumulation_steps
     num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs) if args.do_train else 0
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps * args.warmup_proportion), num_training_steps=num_train_steps)
 
@@ -351,7 +358,7 @@ def main():
         optimizer.load_state_dict(ckpt['optimizer_state_dict']); scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_epoch = ckpt['epoch'] + 1; max_f1 = ckpt.get('best_score', 0.0)
 
-    # --- TRAINING LOOP (With TQDM Context Manager) ---
+    # --- TRAINING LOOP ---
     if args.do_train:
         train_loader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), batch_size=args.train_batch_size)
         dev_loader = DataLoader(dev_dataset, sampler=SequentialSampler(dev_dataset), batch_size=args.eval_batch_size)
@@ -361,7 +368,6 @@ def main():
             model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
             
-            # Sử dụng TQDM làm Context Manager giống run_multimodal_fcmf.py
             with tqdm(train_loader, desc=f"Epoch {epoch}", dynamic_ncols=True) as tepoch:
                 for step, batch in enumerate(tepoch):
                     batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
@@ -380,7 +386,6 @@ def main():
                                            visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
                             loss += criterion(logits, labels[:,id_asp])
                         
-                        # [CRITICAL UPDATE] Chia loss cho gradient accumulation steps
                         loss = loss / args.gradient_accumulation_steps
 
                     if args.fp16: scaler.scale(loss).backward()
@@ -391,14 +396,11 @@ def main():
                         else: torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
                         scheduler.step(); optimizer.zero_grad()
                     
-                    # [CRITICAL UPDATE] Update progress bar với loss thực tế (nhân ngược lại)
                     tepoch.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
             
-            # Log LR cuối epoch
             current_lr = optimizer.param_groups[0]['lr']
             logger.info(f"Epoch {epoch} Completed. Current LR: {current_lr:.2e}")
 
-            # --- Eval ---
             if args.do_eval:
                 model.eval()
                 true_label, pred_label = {asp:[] for asp in ASPECT}, {asp:[] for asp in ASPECT}
@@ -428,7 +430,6 @@ def main():
                     max_f1 = avg_f1
                     save_model(f'{args.output_dir}/tombert_best.pth', model, optimizer, scheduler, epoch, max_f1, scaler)
 
-    # --- TEST ---
     if args.do_eval:
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
         test_data = pd.read_json(f'{args.data_dir}/test.json')
@@ -436,8 +437,7 @@ def main():
         test_dataset = TomBERTDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_loader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
-        # best_path = f'{args.output_dir}/tombert_best.pth'
-        best_path = f'/kaggle/input/tombert-13-epoch/pytorch/default/2/tombert_best_18_epoch.pth'
+        best_path = f'{args.output_dir}/tombert_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device)
@@ -477,7 +477,6 @@ def main():
                 
                 formatted_results.extend(batch_logs)
 
-        # Save Metrics
         with open(os.path.join(args.output_dir, "test_results_tombert.txt"), "w") as writer:
             writer.write("***** Test results *****\n")
             all_f1 = 0
@@ -491,7 +490,6 @@ def main():
             writer.write(f"Average F1: {avg_f1:.4f}\n")
             logger.info(f"Test Average F1: {avg_f1:.4f}")
 
-        # Save Logs
         with open(f"{args.output_dir}/test_predictions_formatted.txt", "w", encoding="utf-8") as f:
             f.write(f"TEST DETAILED PREDICTIONS\nAverage Macro F1: {avg_f1:.4f}\n{'='*50}\n\n")
             for i, sample in enumerate(formatted_results):
