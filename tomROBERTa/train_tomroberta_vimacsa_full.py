@@ -436,7 +436,8 @@ def main():
         test_dataset = TomBERTDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_loader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
-        best_path = f'{args.output_dir}/tombert_best.pth'
+        # best_path = f'{args.output_dir}/tombert_best.pth'
+        best_path = f'/kaggle/input/tombert-13-epoch/pytorch/default/2/tombert_best_18_epoch.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device)
