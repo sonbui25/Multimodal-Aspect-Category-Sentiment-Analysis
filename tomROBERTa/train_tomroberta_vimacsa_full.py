@@ -1,9 +1,9 @@
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # train_tomroberta_vimacsa_full.py
 # Full implementation of Multimodal TomBERT for ViMACSA
 # Based on Official TomBERT Architecture (1-Layer Cross, 1-Layer Fusion)
-
-import os
-import sys
 import json
 import random
 import logging
