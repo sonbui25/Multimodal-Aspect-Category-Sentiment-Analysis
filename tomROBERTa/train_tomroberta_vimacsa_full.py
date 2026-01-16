@@ -369,7 +369,7 @@ def main():
             optimizer.zero_grad()
             
             # Use TQDM Bar for Status, No extra prints
-            with tqdm(train_loader, desc=f"Epoch {epoch}", dynamic_ncols=True) as tepoch:
+            with tqdm(train_loader, desc=f"Epoch {epoch}", position=0, leave=True, dynamic_ncols=False, ncols=100) as tepoch:
                 for step, batch in enumerate(tepoch):
                     t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                     t_img = t_img.to(device); roi_img = roi_img.to(device).float()
@@ -404,7 +404,7 @@ def main():
                         scheduler.step(); optimizer.zero_grad()
                     
                     # Update bar with loss
-                    tepoch.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
+                    tepoch.set_postfix_str(f"loss={loss.item() * args.gradient_accumulation_steps:.4f}")
             
             # --- Eval (Compact logging) ---
             model.eval(); resnet_img.eval(); resnet_roi.eval()
