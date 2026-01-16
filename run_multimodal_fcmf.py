@@ -96,14 +96,14 @@ def main():
     parser.add_argument("--do_eval", action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--freeze_encoder", action='store_true', help="Freeze the encoder weights during training.")
     
-    parser.add_argument("--train_batch_size", default=8, type=int, help="Total batch size for training.")
-    parser.add_argument("--eval_batch_size", default=8, type=int, help="Total batch size for eval.")
+    parser.add_argument("--train_batch_size", default=4, type=int, help="Total batch size for training (reduced from 8).")
+    parser.add_argument("--eval_batch_size", default=4, type=int, help="Total batch size for eval (reduced from 8).")
     parser.add_argument("--encoder_learning_rate", default=7e-5, type=float, help="The initial learning rate for encoder.")
     parser.add_argument("--classifier_head_learning_rate", default=7e-4, type=float, help="The initial learning rate for classifier head.")
     parser.add_argument("--num_train_epochs", default=8.0, type=float, help="Total number of training epochs.")
     parser.add_argument("--warmup_proportion", default=0.1, type=float, help="Proportion of training to perform linear learning rate warmup.")
     
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of updates steps to accumulate.")
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=2, help="Number of updates steps to accumulate (increased from 1 to 2).")
     parser.add_argument('--seed', type=int, default=42, help="random seed for initialization")
     parser.add_argument('--fp16', action='store_true', help="Whether to use 16-bit float precision")
     parser.add_argument('--alpha', type=float, default=1, help="Alpha value for keeping strong visual features")
@@ -112,6 +112,7 @@ def main():
     # --- SYSTEM ARGUMENTS ---
     parser.add_argument("--no_cuda", action='store_true', help="Whether not to use CUDA when available")
     parser.add_argument("--ddp", action='store_true', help="local_rank for distributed training on gpus")
+    parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training (set by torch.distributed.launch)")
 
     args = parser.parse_args()
 
