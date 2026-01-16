@@ -158,7 +158,7 @@ def main():
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
                             args.gradient_accumulation_steps))
         
-    # args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
+    args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
     # KHÔNG chia batch_size cho gradient_accumulation_steps - nó là 2 concept khác nhau
     # Batch size = kích thước batch thực tế
     # Gradient accumulation = số bước trước khi update weights
