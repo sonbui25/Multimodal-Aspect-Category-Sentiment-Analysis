@@ -271,16 +271,16 @@ def main():
     parser.add_argument("--pretrained_hf_model", default="xlm-roberta-base", type=str)
     parser.add_argument("--list_aspect", default=['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area'], nargs='+')
     parser.add_argument("--num_polarity", default=4, type=int)
-    parser.add_argument("--num_imgs", default=3, type=int)
-    parser.add_argument("--num_rois", default=7, type=int)
+    parser.add_argument("--num_imgs", default=7, type=int, help="Number of images (matched with FCMF).")
+    parser.add_argument("--num_rois", default=4, type=int, help="Number of RoIs (matched with FCMF).")
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
-    parser.add_argument("--train_batch_size", default=4, type=int, help="Total batch size for training (reduced to 4 to match FCMF).")
-    parser.add_argument("--eval_batch_size", default=4, type=int, help="Total batch size for eval (reduced to 4 to match FCMF).")
-    parser.add_argument("--learning_rate", default=2e-5, type=float)
-    parser.add_argument("--num_train_epochs", default=10.0, type=float)
-    parser.add_argument("--warmup_proportion", default=0.1, type=float)
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=2, help="Number of updates steps to accumulate (increased from 1 to 2 to match FCMF).")
+    parser.add_argument("--train_batch_size", default=4, type=int, help="Total batch size for training (matched with FCMF).")
+    parser.add_argument("--eval_batch_size", default=8, type=int, help="Total batch size for eval (matched with FCMF).")
+    parser.add_argument("--learning_rate", default=3e-5, type=float, help="Learning rate for optimizer (matched with FCMF).")
+    parser.add_argument("--num_train_epochs", default=13, type=float, help="Total number of training epochs (matched with FCMF: 13 epochs = 360 steps/epoch * 13).")
+    parser.add_argument("--warmup_proportion", default=0.0, type=float, help="Proportion of training to perform linear learning rate warmup (matched with FCMF).")
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=2, help="Number of updates steps to accumulate (matched with FCMF: 360 steps/epoch).")
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--fine_tune_cnn', action='store_true')
@@ -368,11 +368,19 @@ def main():
     criterion = torch.nn.CrossEntropyLoss()
     scaler = GradScaler() if args.fp16 else None
     
-    # Số bước train được tính dựa trên batch size ĐÃ CHIA (tức là số bước thực tế của loader) chia cho gradient accumulation
-    # Tuy nhiên, do ta đã chia args.train_batch_size ở trên rồi, nên train_loader sẽ dài gấp gradient_accumulation_steps lần.
-    # Vì vậy tổng số bước cập nhật optimizer vẫn là: len(loader) / gradient_accumulation_steps
-    num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs) if args.do_train else 0
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps * args.warmup_proportion), num_training_steps=num_train_steps)
+    # [MATCHING FCMF] Tính num_training_steps cho TOÀN BỘ kế hoạch training
+    # Công thức: len(dataset) / batch_size / gradient_accumulation_steps * num_epochs
+    # Ví dụ: 2880 / 4 / 2 * 13 = 360 * 13 = 4680 steps
+    num_train_steps = 0
+    if args.do_train:
+        num_train_steps = int(len(train_dataset) / args.train_batch_size / 
+                            args.gradient_accumulation_steps * args.num_train_epochs)
+    # [MATCHING FCMF] Tạo scheduler với config
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=int(num_train_steps * args.warmup_proportion),
+        num_training_steps=num_train_steps
+    )
 
     start_epoch = 0; max_f1 = 0.0
     if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint):
@@ -381,6 +389,21 @@ def main():
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict']); scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_epoch = ckpt['epoch'] + 1; max_f1 = ckpt.get('best_score', 0.0)
+
+    # [LOGGING] Log training configuration
+    if args.do_train:
+        steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps)
+        logger.info("="*60)
+        logger.info("TRAINING CONFIGURATION (MATCHED WITH FCMF):")
+        logger.info(f"  Dataset size: {len(train_dataset)} samples")
+        logger.info(f"  Batch size: {args.train_batch_size}")
+        logger.info(f"  Gradient accumulation steps: {args.gradient_accumulation_steps}")
+        logger.info(f"  Steps per epoch: {steps_per_epoch}")
+        logger.info(f"  Total epochs: {int(args.num_train_epochs)}")
+        logger.info(f"  Total training steps: {num_train_steps}")
+        logger.info(f"  Learning rate: {args.learning_rate}")
+        logger.info(f"  Warmup proportion: {args.warmup_proportion} (warmup steps: {int(num_train_steps * args.warmup_proportion)})")
+        logger.info("="*60)
 
     # --- TRAINING LOOP (With TQDM Context Manager) ---
     if args.do_train:
