@@ -365,7 +365,7 @@ class MultimodalEncoder(nn.Module):
     def __init__(self):
         super(MultimodalEncoder, self).__init__()
         layer = BertLayer()
-        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(3)])
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(1)])
 
     def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
         all_encoder_layers = []
@@ -381,7 +381,7 @@ class BertCrossEncoder(nn.Module):
     def __init__(self):
         super(BertCrossEncoder, self).__init__()
         layer = BertCrossAttentionLayer()
-        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(3)])
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(1)])
 
     def forward(self, s1_hidden_states, s2_hidden_states, s2_attention_mask, output_all_encoded_layers=True):
         all_encoder_layers = []
