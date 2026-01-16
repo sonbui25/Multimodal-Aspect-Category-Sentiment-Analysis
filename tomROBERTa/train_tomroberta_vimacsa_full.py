@@ -275,12 +275,12 @@ def main():
     parser.add_argument("--num_rois", default=7, type=int)
     parser.add_argument("--do_train", action='store_true')
     parser.add_argument("--do_eval", action='store_true')
-    parser.add_argument("--train_batch_size", default=8, type=int)
-    parser.add_argument("--eval_batch_size", default=8, type=int)
+    parser.add_argument("--train_batch_size", default=4, type=int, help="Total batch size for training (reduced to 4 to match FCMF).")
+    parser.add_argument("--eval_batch_size", default=4, type=int, help="Total batch size for eval (reduced to 4 to match FCMF).")
     parser.add_argument("--learning_rate", default=2e-5, type=float)
     parser.add_argument("--num_train_epochs", default=10.0, type=float)
     parser.add_argument("--warmup_proportion", default=0.1, type=float)
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=2, help="Number of updates steps to accumulate (increased from 1 to 2 to match FCMF).")
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--fine_tune_cnn', action='store_true')
@@ -414,13 +414,20 @@ def main():
                     roi_embeds = torch.stack(encoded_roi, dim=1)
 
                     with autocast(device_type='cuda', enabled=args.fp16):
-                        # [CRITICAL FIX] Compute loss inside autocast, avoid slicing tensors multiple times
+                        # [CRITICAL FIX] Compute loss inside autocast, clone tensors to avoid in-place modification issues
                         all_asp_loss = 0
                         for id_asp in range(len(ASPECT)):
-                            logits = model(target_ids=tgt_ids[:,id_asp,:], target_mask=tgt_mask[:,id_asp,:],
-                                           sentence_ids=sent_ids[:,id_asp,:], sentence_mask=sent_mask[:,id_asp,:],
+                            # Clone tensor slices to prevent in-place modifications from affecting other iterations
+                            asp_tgt_ids = tgt_ids[:,id_asp,:].clone()
+                            asp_tgt_mask = tgt_mask[:,id_asp,:].clone()
+                            asp_sent_ids = sent_ids[:,id_asp,:].clone()
+                            asp_sent_mask = sent_mask[:,id_asp,:].clone()
+                            asp_labels = labels[:,id_asp]
+                            
+                            logits = model(target_ids=asp_tgt_ids, target_mask=asp_tgt_mask,
+                                           sentence_ids=asp_sent_ids, sentence_mask=asp_sent_mask,
                                            visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
-                            loss = criterion(logits, labels[:,id_asp])
+                            loss = criterion(logits, asp_labels)
                             all_asp_loss = all_asp_loss + loss
 
                         # [CRITICAL UPDATE] Chia loss cho gradient accumulation steps
@@ -473,10 +480,11 @@ def main():
 
                         # Forward pass for each aspect
                         for id_asp in range(len(ASPECT)):
-                            asp_tgt_ids = tgt_ids[:,id_asp,:]
-                            asp_tgt_mask = tgt_mask[:,id_asp,:]
-                            asp_sent_ids = sent_ids[:,id_asp,:]
-                            asp_sent_mask = sent_mask[:,id_asp,:]
+                            # Clone tensor slices to prevent issues with tensor reuse
+                            asp_tgt_ids = tgt_ids[:,id_asp,:].clone()
+                            asp_tgt_mask = tgt_mask[:,id_asp,:].clone()
+                            asp_sent_ids = sent_ids[:,id_asp,:].clone()
+                            asp_sent_mask = sent_mask[:,id_asp,:].clone()
                             asp_labels = labels[:,id_asp]
                             
                             logits = model(target_ids=asp_tgt_ids, target_mask=asp_tgt_mask,
@@ -542,10 +550,11 @@ def main():
                 batch_logs = [{"text": t, "aspects": {}} for t in batch_texts]
 
                 for id_asp in range(len(ASPECT)):
-                    asp_tgt_ids = tgt_ids[:,id_asp,:]
-                    asp_tgt_mask = tgt_mask[:,id_asp,:]
-                    asp_sent_ids = sent_ids[:,id_asp,:]
-                    asp_sent_mask = sent_mask[:,id_asp,:]
+                    # Clone tensor slices to prevent issues with tensor reuse
+                    asp_tgt_ids = tgt_ids[:,id_asp,:].clone()
+                    asp_tgt_mask = tgt_mask[:,id_asp,:].clone()
+                    asp_sent_ids = sent_ids[:,id_asp,:].clone()
+                    asp_sent_mask = sent_mask[:,id_asp,:].clone()
                     asp_labels = labels[:,id_asp]
                     
                     logits = model(target_ids=asp_tgt_ids, target_mask=asp_tgt_mask,
