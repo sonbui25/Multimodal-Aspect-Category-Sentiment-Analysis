@@ -399,31 +399,46 @@ def main():
                     t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                     roi_img = roi_img.float()
 
-                    with autocast(device_type='cuda', enabled=args.fp16):
-                        encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
-                        encoded_roi = [torch.stack([resnet_roi(roi_img[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
-                        vis_embeds = torch.stack(encoded_img, dim=1); roi_embeds = torch.stack(encoded_roi, dim=1)
+                    # [CRITICAL FIX] Extract features OUTSIDE autocast to avoid tensor reuse issues
+                    encoded_img = []
+                    for img_idx in range(args.num_imgs):
+                        img_f = resnet_img(t_img[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
+                        encoded_img.append(img_f)
+                    
+                    encoded_roi = []
+                    for img_idx in range(args.num_imgs):
+                        roi_list = [resnet_roi(roi_img[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
+                        encoded_roi.append(torch.stack(roi_list, dim=1))
+                    
+                    vis_embeds = torch.stack(encoded_img, dim=1)
+                    roi_embeds = torch.stack(encoded_roi, dim=1)
 
-                        loss = 0
+                    with autocast(device_type='cuda', enabled=args.fp16):
+                        # [CRITICAL FIX] Compute loss inside autocast, avoid slicing tensors multiple times
+                        all_asp_loss = 0
                         for id_asp in range(len(ASPECT)):
                             logits = model(target_ids=tgt_ids[:,id_asp,:], target_mask=tgt_mask[:,id_asp,:],
                                            sentence_ids=sent_ids[:,id_asp,:], sentence_mask=sent_mask[:,id_asp,:],
                                            visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
-                            loss += criterion(logits, labels[:,id_asp])
-                        
-                        # [CRITICAL UPDATE] Chia loss cho gradient accumulation steps
-                        loss = loss / args.gradient_accumulation_steps
+                            loss = criterion(logits, labels[:,id_asp])
+                            all_asp_loss = all_asp_loss + loss
 
-                    if args.fp16: scaler.scale(loss).backward()
-                    else: loss.backward()
+                        # [CRITICAL UPDATE] Chia loss cho gradient accumulation steps
+                        if args.gradient_accumulation_steps > 1:
+                            all_asp_loss = all_asp_loss / args.gradient_accumulation_steps
+
+                    if args.fp16: scaler.scale(all_asp_loss).backward()
+                    else: all_asp_loss.backward()
 
                     if (step + 1) % args.gradient_accumulation_steps == 0:
-                        if args.fp16: scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); scaler.step(optimizer); scaler.update()
-                        else: torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
+                        if args.fp16: scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        if args.fp16: scaler.step(optimizer); scaler.update()
+                        else: optimizer.step()
                         scheduler.step(); optimizer.zero_grad()
                     
-                    # [CRITICAL UPDATE] Update progress bar với loss thực tế (nhân ngược lại)
-                    tepoch.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
+                    # [CRITICAL UPDATE] Update progress bar với loss thực tế
+                    tepoch.set_postfix(loss=all_asp_loss.item() * args.gradient_accumulation_steps)
             
             # Log LR cuối epoch
             current_lr = optimizer.param_groups[0]['lr']
@@ -431,23 +446,44 @@ def main():
 
             # --- Eval ---
             if args.do_eval:
-                model.eval()
+                model.eval(); resnet_img.eval(); resnet_roi.eval()
                 true_label, pred_label = {asp:[] for asp in ASPECT}, {asp:[] for asp in ASPECT}
                 with torch.no_grad():
                     for batch in tqdm(dev_loader, desc="Evaluating Dev", leave=False):
                         batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                         t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                         roi_img = roi_img.float()
-                        encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
-                        encoded_roi = [torch.stack([resnet_roi(roi_img[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
-                        vis_embeds = torch.stack(encoded_img, dim=1); roi_embeds = torch.stack(encoded_roi, dim=1)
+                        
+                        # Extract image features
+                        encoded_img = []
+                        for img_idx in range(args.num_imgs):
+                            img_f = resnet_img(t_img[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
+                            encoded_img.append(img_f)
+                        vis_embeds = torch.stack(encoded_img, dim=1)
+                        
+                        # Extract ROI features
+                        encoded_roi = []
+                        for img_idx in range(args.num_imgs):
+                            roi_list = []
+                            for r in range(args.num_rois):
+                                roi_f = resnet_roi(roi_img[:,img_idx,r,:]).squeeze(1)
+                                roi_list.append(roi_f)
+                            encoded_roi.append(torch.stack(roi_list, dim=1))
+                        roi_embeds = torch.stack(encoded_roi, dim=1)
 
+                        # Forward pass for each aspect
                         for id_asp in range(len(ASPECT)):
-                            logits = model(target_ids=tgt_ids[:,id_asp,:], target_mask=tgt_mask[:,id_asp,:],
-                                           sentence_ids=sent_ids[:,id_asp,:], sentence_mask=sent_mask[:,id_asp,:],
+                            asp_tgt_ids = tgt_ids[:,id_asp,:]
+                            asp_tgt_mask = tgt_mask[:,id_asp,:]
+                            asp_sent_ids = sent_ids[:,id_asp,:]
+                            asp_sent_mask = sent_mask[:,id_asp,:]
+                            asp_labels = labels[:,id_asp]
+                            
+                            logits = model(target_ids=asp_tgt_ids, target_mask=asp_tgt_mask,
+                                           sentence_ids=asp_sent_ids, sentence_mask=asp_sent_mask,
                                            visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
                             pred_label[ASPECT[id_asp]].append(np.argmax(logits.cpu().numpy(), axis=-1))
-                            true_label[ASPECT[id_asp]].append(labels[:,id_asp].cpu().numpy())
+                            true_label[ASPECT[id_asp]].append(asp_labels.cpu().numpy())
 
                 total_f1 = 0
                 for asp in ASPECT:
@@ -486,18 +522,37 @@ def main():
                 t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels = batch_tensors
                 roi_img = roi_img.float()
 
-                encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
-                encoded_roi = [torch.stack([resnet_roi(roi_img[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
-                vis_embeds = torch.stack(encoded_img, dim=1); roi_embeds = torch.stack(encoded_roi, dim=1)
+                # Extract image features
+                encoded_img = []
+                for img_idx in range(args.num_imgs):
+                    img_f = resnet_img(t_img[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
+                    encoded_img.append(img_f)
+                vis_embeds = torch.stack(encoded_img, dim=1)
+                
+                # Extract ROI features
+                encoded_roi = []
+                for img_idx in range(args.num_imgs):
+                    roi_list = []
+                    for r in range(args.num_rois):
+                        roi_f = resnet_roi(roi_img[:,img_idx,r,:]).squeeze(1)
+                        roi_list.append(roi_f)
+                    encoded_roi.append(torch.stack(roi_list, dim=1))
+                roi_embeds = torch.stack(encoded_roi, dim=1)
 
                 batch_logs = [{"text": t, "aspects": {}} for t in batch_texts]
 
                 for id_asp in range(len(ASPECT)):
-                    logits = model(target_ids=tgt_ids[:,id_asp,:], target_mask=tgt_mask[:,id_asp,:],
-                                   sentence_ids=sent_ids[:,id_asp,:], sentence_mask=sent_mask[:,id_asp,:],
+                    asp_tgt_ids = tgt_ids[:,id_asp,:]
+                    asp_tgt_mask = tgt_mask[:,id_asp,:]
+                    asp_sent_ids = sent_ids[:,id_asp,:]
+                    asp_sent_mask = sent_mask[:,id_asp,:]
+                    asp_labels = labels[:,id_asp]
+                    
+                    logits = model(target_ids=asp_tgt_ids, target_mask=asp_tgt_mask,
+                                   sentence_ids=asp_sent_ids, sentence_mask=asp_sent_mask,
                                    visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
                     preds = np.argmax(logits.cpu().numpy(), axis=-1)
-                    true_labels = labels[:,id_asp].cpu().numpy()
+                    true_labels = asp_labels.cpu().numpy()
                     
                     true_label_list[ASPECT[id_asp]].append(true_labels)
                     pred_label_list[ASPECT[id_asp]].append(preds)
