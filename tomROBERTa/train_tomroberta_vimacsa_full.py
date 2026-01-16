@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.autograd import Variable
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
@@ -171,7 +171,7 @@ class myResNetImg(nn.Module):
         x = self.resnet.conv1(x); x = self.resnet.bn1(x); x = self.resnet.relu(x); x = self.resnet.maxpool(x)
         x = self.resnet.layer1(x); x = self.resnet.layer2(x); x = self.resnet.layer3(x); x = self.resnet.layer4(x)
         att = F.adaptive_avg_pool2d(x, [att_size, att_size])
-        if not self.if_fine_tune: att = Variable(att.data)
+        if not self.if_fine_tune: att = att.detach()
         return att
 
 class myResNetRoI(nn.Module):
@@ -183,7 +183,7 @@ class myResNetRoI(nn.Module):
         x = self.resnet.conv1(x); x = self.resnet.bn1(x); x = self.resnet.relu(x); x = self.resnet.maxpool(x)
         x = self.resnet.layer1(x); x = self.resnet.layer2(x); x = self.resnet.layer3(x); x = self.resnet.layer4(x)
         fc = x.mean(3).mean(2)
-        if not self.if_fine_tune: fc = Variable(fc.data)
+        if not self.if_fine_tune: fc = fc.detach()
         return fc
 
 class TargetImageMatching(nn.Module):
@@ -196,7 +196,8 @@ class TargetImageMatching(nn.Module):
     def forward(self, target_feats, image_feats):
         attn_out, _ = self.mha(query=target_feats, key=image_feats, value=image_feats)
         h_v = self.norm1(target_feats + self.dropout(attn_out))
-        h_v = self.norm2(h_v + self.feed_forward(h_v))
+        ff_out = self.feed_forward(h_v)
+        h_v = self.norm2(h_v + ff_out)
         return h_v
 
 class TomBERT(nn.Module):
@@ -398,7 +399,7 @@ def main():
                     t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                     roi_img = roi_img.float()
 
-                    with autocast(enabled=args.fp16):
+                    with autocast(device_type='cuda', enabled=args.fp16):
                         encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
                         encoded_roi = [torch.stack([resnet_roi(roi_img[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
                         vis_embeds = torch.stack(encoded_img, dim=1); roi_embeds = torch.stack(encoded_roi, dim=1)
