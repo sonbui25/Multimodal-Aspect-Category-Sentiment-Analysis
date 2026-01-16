@@ -17,19 +17,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import GradScaler
+# Remove deprecated autocast import if we use torch.amp.autocast directly
+# from torch.cuda.amp import autocast 
 from torch.autograd import Variable
 
 from torchvision import transforms
 from torchvision.io import read_image, ImageReadMode
 from torchvision.models import resnet152, ResNet152_Weights
 
-from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup, AutoConfig
+from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 from sklearn.metrics import precision_recall_fscore_support
 from text_preprocess import TextNormalize, convert_unicode
 
 # ==============================================================================
-# 1. SETUP LOGGING (MATCHING FCMF STYLE)
+# 1. SETUP LOGGING
 # ==============================================================================
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -152,7 +154,7 @@ class TomBERTDataset(Dataset):
             enc_tgt = self.tokenizer(target_text, max_length=16, padding='max_length', truncation=True)
             
             clean_review = text.replace('_', ' ').lower()
-            enc_sent = self.tokenizer(text=clean_review, text_pair=target_text, max_length=256, padding='max_length', truncation=True)
+            enc_sent = self.tokenizer(text=clean_review, text_pair=target_text, max_length=170, padding='max_length', truncation=True)
 
             out_tgt_ids.append(torch.tensor(enc_tgt['input_ids']))
             out_tgt_mask.append(torch.tensor(enc_tgt['attention_mask']))
@@ -279,7 +281,7 @@ def main():
     parser.add_argument('--image_dir', default='../vimacsa/image')
     parser.add_argument("--pretrained_hf_model", default="xlm-roberta-base", type=str)
     
-    # Args from FCMF
+    # Args
     parser.add_argument("--list_aspect", default=['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area'], nargs='+')
     parser.add_argument("--num_polarity", default=4, type=int)
     parser.add_argument("--num_imgs", default=3, type=int)
@@ -303,7 +305,13 @@ def main():
     
     args = parser.parse_args()
     
-    # Setup Device & Logging like FCMF
+    # --- [FIX LOGIC] Update batch size BEFORE creating DataLoader ---
+    if args.gradient_accumulation_steps < 1:
+        raise ValueError(f"Invalid gradient_accumulation_steps: {args.gradient_accumulation_steps}, should be >= 1")
+    
+    args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
+    
+    # Setup Device & Logging
     if args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     else:
@@ -316,7 +324,7 @@ def main():
         
     logger.info("***** Running training *****")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Batch size = {args.train_batch_size}")
+    logger.info(f"  Instantaneous batch size per GPU = {args.train_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -324,7 +332,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
     normalize_class = TextNormalize()
     
-    # Load ROI
     roi_path = os.path.join(args.data_dir, "roi_data.csv")
     if os.path.exists(roi_path):
         roi_df = pd.read_csv(roi_path)
@@ -355,53 +362,62 @@ def main():
         
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
         
-        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
-        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps * args.warmup_proportion), num_training_steps=num_train_steps)
+        total_steps = len(train_loader) // args.gradient_accumulation_steps * args.num_train_epochs
+        logger.info(f"  Total optimization steps = {total_steps}")
+        
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(args.warmup_proportion*total_steps), num_training_steps=total_steps)
         scaler = GradScaler() if args.fp16 else None
         criterion = nn.CrossEntropyLoss()
         
         best_f1 = 0.0
         
-        for epoch in range(int(args.num_train_epochs)):
-            logger.info(f"********** Epoch: {epoch} **********")
+        train_iterator = trange(int(args.num_train_epochs), desc="Epoch")
+        
+        for epoch in train_iterator:
             model.train(); resnet_img.train(); resnet_roi.train()
+            optimizer.zero_grad()
             
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch}", dynamic_ncols=True)
-            for step, batch in enumerate(pbar):
-                t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
-                t_img = t_img.to(device); roi_img = roi_img.to(device).float()
-                tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
-                sent_ids = sent_ids.to(device); sent_mask = sent_mask.to(device)
-                labels = labels.to(device)
-                
-                with autocast(enabled=args.fp16):
-                    encoded_img = [resnet_img(t_img[:, i]).view(t_img.size(0), 2048, 49).permute(0, 2, 1) for i in range(t_img.shape[1])]
-                    vis_embeds = torch.stack(encoded_img, dim=1)
+            # Use 'tepoch' style for progress bar, matching FCMF
+            with tqdm(train_loader, desc="Iteration", dynamic_ncols=True) as tepoch:
+                for step, batch in enumerate(tepoch):
+                    tepoch.set_description(f"Epoch {epoch}")
                     
-                    encoded_roi = []
-                    for i in range(roi_img.shape[1]):
-                        rois_in_img = [resnet_roi(roi_img[:, i, r]) for r in range(roi_img.shape[2])]
-                        encoded_roi.append(torch.stack(rois_in_img, dim=1))
-                    roi_embeds = torch.stack(encoded_roi, dim=1)
+                    t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
+                    t_img = t_img.to(device); roi_img = roi_img.to(device).float()
+                    tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
+                    sent_ids = sent_ids.to(device); sent_mask = sent_mask.to(device)
+                    labels = labels.to(device)
                     
-                    loss = 0
-                    for asp_idx in range(len(args.list_aspect)):
-                        logits = model(tgt_ids[:, asp_idx], tgt_mask[:, asp_idx], sent_ids[:, asp_idx], sent_mask[:, asp_idx], vis_embeds, roi_embeds)
-                        loss += criterion(logits, labels[:, asp_idx])
-                    loss = loss / args.gradient_accumulation_steps
-                
-                if args.fp16:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                    # [FIX] Use torch.amp.autocast to avoid warnings
+                    with torch.amp.autocast('cuda', enabled=args.fp16):
+                        encoded_img = [resnet_img(t_img[:, i]).view(t_img.size(0), 2048, 49).permute(0, 2, 1) for i in range(t_img.shape[1])]
+                        vis_embeds = torch.stack(encoded_img, dim=1)
+                        
+                        encoded_roi = []
+                        for i in range(roi_img.shape[1]):
+                            rois_in_img = [resnet_roi(roi_img[:, i, r]) for r in range(roi_img.shape[2])]
+                            encoded_roi.append(torch.stack(rois_in_img, dim=1))
+                        roi_embeds = torch.stack(encoded_roi, dim=1)
+                        
+                        loss = 0
+                        for asp_idx in range(len(args.list_aspect)):
+                            logits = model(tgt_ids[:, asp_idx], tgt_mask[:, asp_idx], sent_ids[:, asp_idx], sent_mask[:, asp_idx], vis_embeds, roi_embeds)
+                            loss += criterion(logits, labels[:, asp_idx])
+                        loss = loss / args.gradient_accumulation_steps
                     
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    if args.fp16: scaler.step(optimizer); scaler.update()
-                    else: optimizer.step()
-                    optimizer.zero_grad(); scheduler.step()
-                
-                pbar.set_postfix({'loss': loss.item() * args.gradient_accumulation_steps})
+                    if args.fp16:
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+                        
+                    if (step + 1) % args.gradient_accumulation_steps == 0:
+                        if args.fp16: scaler.step(optimizer); scaler.update()
+                        else: optimizer.step()
+                        scheduler.step(); optimizer.zero_grad()
+                    
+                    tepoch.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
             
+            # End of Epoch
             logger.info(f"--> Epoch {epoch} Completed.")
             
             # Eval
@@ -411,7 +427,7 @@ def main():
             pred_labels = {asp: [] for asp in args.list_aspect}
             
             with torch.no_grad():
-                for batch in tqdm(dev_loader, leave=False):
+                for batch in tqdm(dev_loader, desc="Evaluating Dev", leave=False):
                     t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                     t_img = t_img.to(device); roi_img = roi_img.to(device).float()
                     tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
