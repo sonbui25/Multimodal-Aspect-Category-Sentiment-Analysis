@@ -18,8 +18,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 from torch.cuda.amp import GradScaler
-# Remove deprecated autocast import if we use torch.amp.autocast directly
-# from torch.cuda.amp import autocast 
 from torch.autograd import Variable
 
 from torchvision import transforms
@@ -68,7 +66,7 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0, scaler=
 # ==============================================================================
 
 class TomBERTDataset(Dataset):
-    def __init__(self, data, tokenizer, img_folder, roi_df, aspects, num_img=3, num_roi=7):
+    def __init__(self, data, tokenizer, img_folder, roi_df, aspects, num_img=7, num_roi=4):
         self.data = data 
         self.ASPECT = aspects
         self.pola_to_num = {"None": 0, "Negative": 1, "Neutral": 2, "Positive": 3}
@@ -305,27 +303,24 @@ def main():
     
     args = parser.parse_args()
     
-    # --- [FIX LOGIC] Update batch size BEFORE creating DataLoader ---
+    # [FIX] Update batch size BEFORE creating DataLoader
     if args.gradient_accumulation_steps < 1:
-        raise ValueError(f"Invalid gradient_accumulation_steps: {args.gradient_accumulation_steps}, should be >= 1")
-    
+        raise ValueError(f"Invalid gradient_accumulation_steps: {args.gradient_accumulation_steps}")
     args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
     
-    # Setup Device & Logging
+    # Device
     if args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-    print(f"Running on device:{device}")
+    print(f"Running on device: {device}")
     
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
+    if not os.path.exists(args.output_dir): os.makedirs(args.output_dir)
         
     logger.info("***** Running training *****")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per GPU = {args.train_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info(f"  Batch size (per device) = {args.train_batch_size}")
+    logger.info(f"  Grad Accum steps = {args.gradient_accumulation_steps}")
     
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     
@@ -338,7 +333,6 @@ def main():
     else:
         roi_df = pd.DataFrame(columns=['file_name', 'x1', 'y1', 'x2', 'y2'])
 
-    # Build Model
     model = TomBERT(args.pretrained_hf_model, num_labels=args.num_polarity).to(device)
     
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
@@ -346,7 +340,6 @@ def main():
     resnet_img = myResNetImg(img_res_model, args.fine_tune_cnn).to(device)
     resnet_roi = myResNetRoI(roi_res_model, args.fine_tune_cnn).to(device)
 
-    # Train Loop
     if args.do_train:
         train_df = pd.read_json(os.path.join(args.data_dir, 'train.json'))
         dev_df = pd.read_json(os.path.join(args.data_dir, 'dev.json'))
@@ -363,8 +356,6 @@ def main():
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
         
         total_steps = len(train_loader) // args.gradient_accumulation_steps * args.num_train_epochs
-        logger.info(f"  Total optimization steps = {total_steps}")
-        
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(args.warmup_proportion*total_steps), num_training_steps=total_steps)
         scaler = GradScaler() if args.fp16 else None
         criterion = nn.CrossEntropyLoss()
@@ -377,18 +368,15 @@ def main():
             model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
             
-            # Use 'tepoch' style for progress bar, matching FCMF
-            with tqdm(train_loader, desc="Iteration", dynamic_ncols=True) as tepoch:
+            # Use TQDM Bar for Status, No extra prints
+            with tqdm(train_loader, desc=f"Epoch {epoch}", dynamic_ncols=True) as tepoch:
                 for step, batch in enumerate(tepoch):
-                    tepoch.set_description(f"Epoch {epoch}")
-                    
                     t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                     t_img = t_img.to(device); roi_img = roi_img.to(device).float()
                     tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
                     sent_ids = sent_ids.to(device); sent_mask = sent_mask.to(device)
                     labels = labels.to(device)
                     
-                    # [FIX] Use torch.amp.autocast to avoid warnings
                     with torch.amp.autocast('cuda', enabled=args.fp16):
                         encoded_img = [resnet_img(t_img[:, i]).view(t_img.size(0), 2048, 49).permute(0, 2, 1) for i in range(t_img.shape[1])]
                         vis_embeds = torch.stack(encoded_img, dim=1)
@@ -415,19 +403,16 @@ def main():
                         else: optimizer.step()
                         scheduler.step(); optimizer.zero_grad()
                     
+                    # Update bar with loss
                     tepoch.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
             
-            # End of Epoch
-            logger.info(f"--> Epoch {epoch} Completed.")
-            
-            # Eval
-            logger.info("***** Running evaluation on Dev Set *****")
+            # --- Eval (Compact logging) ---
             model.eval(); resnet_img.eval(); resnet_roi.eval()
             true_labels = {asp: [] for asp in args.list_aspect}
             pred_labels = {asp: [] for asp in args.list_aspect}
             
             with torch.no_grad():
-                for batch in tqdm(dev_loader, desc="Evaluating Dev", leave=False):
+                for batch in tqdm(dev_loader, desc="Eval", leave=False):
                     t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                     t_img = t_img.to(device); roi_img = roi_img.to(device).float()
                     tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
@@ -449,23 +434,22 @@ def main():
             
             f1_scores = [macro_f1(true_labels[asp], pred_labels[asp])[2] for asp in args.list_aspect]
             avg_f1 = np.mean(f1_scores)
-            logger.info(f"  Dev Macro-F1: {avg_f1}")
+            
+            # Print F1 cleanly
+            tqdm.write(f"Epoch {epoch} | Dev F1: {avg_f1:.4f}")
             
             if avg_f1 > best_f1:
                 best_f1 = avg_f1
-                logger.info(f"  New Best F1 ({best_f1:.4f})! Saving best model...")
+                tqdm.write(f">> New Best F1: {best_f1:.4f}")
                 save_model(os.path.join(args.output_dir, 'tombert_best.pth'), model, optimizer, scheduler, epoch, best_f1, scaler)
 
-    # Test Loop
     if args.do_eval:
-        logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
+        logger.info("\n=== STARTING TEST ===")
         best_path = os.path.join(args.output_dir, 'tombert_best.pth')
         if os.path.exists(best_path):
-            logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            logger.warning("No best model found! Using current weights.")
+            logger.info(f"Loaded Best F1: {checkpoint['best_score']}")
             
         test_df = pd.read_json(os.path.join(args.data_dir, 'test.json'))
         test_df['comment'] = test_df['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
@@ -502,23 +486,21 @@ def main():
                     
                     for i, (p, l) in enumerate(zip(preds, labels[:, asp_idx].numpy())):
                         batch_logs[i]["aspects"][asp_name] = {"predict": POLARITY_MAP[p], "label": POLARITY_MAP[l]}
-                
                 formatted_results.extend(batch_logs)
         
-        # Save results
-        with open(os.path.join(args.output_dir, 'test_results.txt'), 'w') as f:
-            f.write("***** Test results *****\n")
-            all_f1 = 0
-            for asp in args.list_aspect:
-                p, r, f1 = macro_f1(test_true[asp], test_pred[asp])
-                all_f1 += f1
-                msg = f"{asp} - P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}"
-                f.write(msg + "\n"); logger.info(msg)
-            
-            avg_f1 = all_f1 / len(args.list_aspect)
-            f.write(f"Average F1: {avg_f1:.4f}\n"); logger.info(f"Average F1: {avg_f1:.4f}")
-
-        # Formatted detailed log
+        result_str = "\n***** Test Results *****\n"
+        avg_f1 = 0
+        for asp in args.list_aspect:
+            p, r, f1 = macro_f1(test_true[asp], test_pred[asp])
+            avg_f1 += f1
+            result_str += f"{asp:<15} | F1: {f1:.4f} | P: {p:.4f} | R: {r:.4f}\n"
+        
+        avg_f1 /= len(args.list_aspect)
+        result_str += "-"*40 + f"\nAVERAGE MACRO F1: {avg_f1:.4f}\n"
+        
+        logger.info(result_str)
+        with open(os.path.join(args.output_dir, 'test_results.txt'), 'w') as f: f.write(result_str)
+        
         log_path = os.path.join(args.output_dir, "test_predictions_formatted.txt")
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"TEST DETAILED PREDICTIONS\nAverage Macro F1: {avg_f1:.4f}\n{'='*50}\n\n")
@@ -529,7 +511,7 @@ def main():
                     res = sample['aspects'].get(asp, {'predict': 'N/A', 'label': 'N/A'})
                     f.write(f"   {asp}: Predict: {res['predict']}, Label: {res['label']}\n")
                 f.write("}\n")
-        logger.info(f"Formatted predictions saved to {log_path}")
+        logger.info(f"Detailed predictions saved to {log_path}")
 
 if __name__ == '__main__':
     main()
