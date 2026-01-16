@@ -1,24 +1,22 @@
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# train_tomroberta_vimacsa_full.py
-# Full implementation of Multimodal TomBERT for ViMACSA
-# Based on Official TomBERT Architecture (1-Layer Cross, 1-Layer Fusion)
-# train_tomroberta_vimacsa_full.py
 import json
 import random
 import logging
 import argparse
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm, trange
+from tqdm.auto import tqdm
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
-from torch.cuda.amp import GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from torch.autograd import Variable
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 
 from torchvision import transforms
 from torchvision.io import read_image, ImageReadMode
@@ -29,161 +27,168 @@ from sklearn.metrics import precision_recall_fscore_support
 from text_preprocess import TextNormalize, convert_unicode
 
 # ==============================================================================
-# 1. SETUP LOGGING
+# 1. UTILS
 # ==============================================================================
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-                    datefmt='%m/%d/%Y %H:%M:%S',
-                    level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 POLARITY_MAP = {0: 'None', 1: 'Negative', 2: 'Neutral', 3: 'Positive'}
 
 def macro_f1(y_true, y_pred):
-    p_macro, r_macro, f_macro, _ = precision_recall_fscore_support(
-        y_true, y_pred, average='macro', zero_division=0.0
-    )
+    p_macro, r_macro, f_macro, _ = precision_recall_fscore_support(y_true, y_pred, average='macro', zero_division=0.0)
     return p_macro, r_macro, f_macro
 
 def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0, scaler=None):
-    if hasattr(model, 'module'): 
-        model_state = model.module.state_dict()
-    else: 
-        model_state = model.state_dict()
-        
+    if hasattr(model, 'module'): model_state = model.module.state_dict()
+    else: model_state = model.state_dict()
     checkpoint_dict = {
-        "epoch": epoch, 
-        "best_score": best_score, 
-        "model_state_dict": model_state,
-        "optimizer_state_dict": optimizer.state_dict(), 
-        "scheduler_state_dict": scheduler.state_dict(),
+        "epoch": epoch, "best_score": best_score, "model_state_dict": model_state,
+        "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(),
     }
-    if scaler is not None: 
-        checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
+    if scaler is not None: checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
     torch.save(checkpoint_dict, path)
 
 # ==============================================================================
-# 2. DATASET
+# 2. DATASET (TomBERT Specific)
 # ==============================================================================
 
 class TomBERTDataset(Dataset):
-    def __init__(self, data, tokenizer, img_folder, roi_df, aspects, num_img=7, num_roi=4):
-        self.data = data 
-        self.ASPECT = aspects
+    def __init__(self, data, tokenizer, img_folder, roi_df, dict_image_aspect, dict_roi_aspect, num_img, num_roi):
+        self.data = data
+        self.ASPECT = ['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area']
         self.pola_to_num = {"None": 0, "Negative": 1, "Neutral": 2, "Positive": 3}
-        
         self.transform = transforms.Compose([
-            transforms.Resize((224,224), antialias=True),  
-            transforms.ConvertImageDtype(torch.float32),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
+                            transforms.Resize((224,224),antialias=True),  
+                            transforms.ConvertImageDtype(torch.float32),
+                            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+                        ])
         self.roi_df = roi_df
         self.img_folder = img_folder
+        self.dict_image_aspect = dict_image_aspect
+        self.dict_roi_aspect = dict_roi_aspect
         self.num_img = num_img
         self.num_roi = num_roi
         self.tokenizer = tokenizer
 
     def __len__(self):
-        return len(self.data)
+        return self.data.shape[0]
         
     def __getitem__(self, idx):
-        row = self.data.iloc[idx]
-        text = str(row['comment'])
-        list_img_path = row['list_img']
+        idx_data = self.data.iloc[idx, :].values
+        text = idx_data[0]
         
-        # --- Image ---
-        list_img_features = []
-        global_roi_features = []
+        # --- Image Loading ---
+        list_img_path = idx_data[1]
+        list_img_features, global_roi_features = [], []
 
         for img_path in list_img_path[:self.num_img]:
-            full_path = os.path.join(self.img_folder, img_path)
+            image_os_path = os.path.join(self.img_folder, img_path)
             try:
-                if os.path.exists(full_path):
-                    one_image = read_image(full_path, mode=ImageReadMode.RGB)
-                    img_tensor = self.transform(one_image).unsqueeze(0)
-                else:
-                    img_tensor = torch.zeros(1, 3, 224, 224)
-                    one_image = torch.zeros(3, 224, 224)
+                one_image = read_image(image_os_path, mode=ImageReadMode.RGB)
+                img_transform = self.transform(one_image).unsqueeze(0)
             except:
-                img_tensor = torch.zeros(1, 3, 224, 224)
+                img_transform = torch.zeros(1, 3, 224, 224)
                 one_image = torch.zeros(3, 224, 224)
-            list_img_features.append(img_tensor)
+            list_img_features.append(img_transform)
             
-            # ROI
-            current_rois = self.roi_df[self.roi_df['file_name'] == img_path].head(self.num_roi)
+            roi_in_img_df = self.roi_df[self.roi_df['file_name'] == img_path][:self.num_roi]
             list_roi_img = []
-            if not current_rois.empty and one_image.shape[0] == 3:
-                for _, roi_row in current_rois.iterrows():
-                    try:
-                        x1, y1, x2, y2 = int(roi_row['x1']), int(roi_row['y1']), int(roi_row['x2']), int(roi_row['y2'])
-                        roi_crop = one_image[:, y1:y2, x1:x2]
-                        if roi_crop.numel() > 0:
-                            roi_tensor = self.transform(roi_crop).numpy()
-                            list_roi_img.append(roi_tensor)
-                    except: pass
             
-            while len(list_roi_img) < self.num_roi:
-                list_roi_img.append(np.zeros((3, 224, 224)))
+            if roi_in_img_df.shape[0] == 0:
+                list_roi_img = np.zeros((self.num_roi, 3, 224, 224))
+            else:
+                for i_roi in range(roi_in_img_df.shape[0]):
+                    x1, x2, y1, y2 = roi_in_img_df.iloc[i_roi, 1:5].values
+                    roi_in_image = one_image[:, x1:x2, y1:y2]
+                    if roi_in_image.numel() == 0: roi_transform = torch.zeros(3, 224, 224).numpy()
+                    else: roi_transform = self.transform(roi_in_image).numpy()
+                    list_roi_img.append(roi_transform)
+                for _ in range(self.num_roi - len(list_roi_img)):
+                    list_roi_img.append(np.zeros((3, 224, 224)))
+            
             global_roi_features.append(list_roi_img)
 
         t_img_features = torch.zeros((self.num_img, 3, 224, 224))
         for i in range(min(len(list_img_features), self.num_img)):
-            t_img_features[i] = list_img_features[i]
+            t_img_features[i,:] = list_img_features[i]
 
         roi_img_features = np.zeros((self.num_img, self.num_roi, 3, 224, 224))
-        for i in range(min(len(global_roi_features), self.num_img)):
-            roi_img_features[i] = np.array(global_roi_features[i])
+        if len(global_roi_features) > 0:
+            for i in range(min(len(global_roi_features), self.num_img)):
+                roi_img_features[i,:] = np.asarray(global_roi_features[i])
 
-        # --- Text ---
-        text_img_label = row.get('text_img_label', []) + row.get('text_label', [])
-        labels_map = {asp: 0 for asp in self.ASPECT}
-        for item in text_img_label:
-            if '#' in item:
-                parts = item.split('#')
-                if len(parts) == 2:
-                    asp, pol = parts
-                    if "_" in asp: asp = "Public_area"
-                    if asp in labels_map: labels_map[asp] = self.pola_to_num.get(pol, 0)
+        # --- Text Processing ---
+        text_img_label = idx_data[3]
+        list_aspect, list_polar = [], []
+        for asp_pol in text_img_label:
+            asp, pol = asp_pol.split("#")
+            if "_" in asp: asp = "Public area"
+            list_aspect.append(asp)
+            list_polar.append(pol)
 
-        out_tgt_ids, out_tgt_mask, out_sent_ids, out_sent_mask, out_labels = [], [], [], [], []
+        for asp in self.ASPECT:
+            if "_" in asp: asp = "Public area"
+            if asp not in list_aspect:
+                list_aspect.append(asp)
+                list_polar.append('None')
 
-        for aspect in self.ASPECT:
-            target_text = aspect.replace('_', ' ').lower()
-            enc_tgt = self.tokenizer(target_text, max_length=16, padding='max_length', truncation=True)
+        out_tgt_ids, out_tgt_mask = [], []
+        out_sent_ids, out_sent_mask = [], []
+        out_labels = []
+
+        for ix in range(len(self.ASPECT)):
+            asp = self.ASPECT[ix]
+            if "_" in asp: asp = "Public area"
+            idx_asp_in_list_asp = list_aspect.index(asp)
+
+            # Target: Aspect only
+            target_text = asp.lower()
+            tokenized_tgt = self.tokenizer(target_text, max_length=16, padding='max_length', truncation=True)
             
-            clean_review = text.replace('_', ' ').lower()
-            enc_sent = self.tokenizer(text=clean_review, text_pair=target_text, max_length=170, padding='max_length', truncation=True)
+            # Sentence: Aspect [SEP] Text
+            sentence_text = f"{asp} </s></s> {text}".lower().replace('_', ' ')
+            tokenized_sent = self.tokenizer(sentence_text, max_length=170, padding='max_length', truncation=True)
 
-            out_tgt_ids.append(torch.tensor(enc_tgt['input_ids']))
-            out_tgt_mask.append(torch.tensor(enc_tgt['attention_mask']))
-            out_sent_ids.append(torch.tensor(enc_sent['input_ids']))
-            out_sent_mask.append(torch.tensor(enc_sent['attention_mask']))
-            out_labels.append(labels_map[aspect])
+            out_tgt_ids.append(torch.tensor(tokenized_tgt['input_ids']))
+            out_tgt_mask.append(torch.tensor(tokenized_tgt['attention_mask']))
+            out_sent_ids.append(torch.tensor(tokenized_sent['input_ids']))
+            out_sent_mask.append(torch.tensor(tokenized_sent['attention_mask']))
+            out_labels.append(self.pola_to_num[list_polar[idx_asp_in_list_asp]])
 
-        return (
-            t_img_features, 
-            torch.tensor(roi_img_features, dtype=torch.float32),
-            torch.stack(out_tgt_ids), torch.stack(out_tgt_mask),
-            torch.stack(out_sent_ids), torch.stack(out_sent_mask),
-            torch.tensor(out_labels, dtype=torch.long), 
-            text
-        )
+        return t_img_features, torch.tensor(roi_img_features), \
+               torch.stack(out_tgt_ids), torch.stack(out_tgt_mask), \
+               torch.stack(out_sent_ids), torch.stack(out_sent_mask), \
+               torch.tensor(out_labels), text
 
 # ==============================================================================
-# 3. MODELS
+# 3. MODELS (TomBERT)
 # ==============================================================================
 
-class BERTLikePooler(nn.Module):
-    def __init__(self, hidden_size):
-        super().__init__()
-        self.dense = nn.Linear(hidden_size, hidden_size)
-        self.activation = nn.Tanh()
-    def forward(self, hidden_states):
-        return self.activation(self.dense(hidden_states[:, 0]))
+class myResNetImg(nn.Module):
+    def __init__(self, resnet, if_fine_tune):
+        super(myResNetImg, self).__init__()
+        self.resnet = resnet
+        self.if_fine_tune = if_fine_tune
+    def forward(self, x, att_size=7):
+        x = self.resnet.conv1(x); x = self.resnet.bn1(x); x = self.resnet.relu(x); x = self.resnet.maxpool(x)
+        x = self.resnet.layer1(x); x = self.resnet.layer2(x); x = self.resnet.layer3(x); x = self.resnet.layer4(x)
+        att = F.adaptive_avg_pool2d(x, [att_size, att_size])
+        if not self.if_fine_tune: att = Variable(att.data)
+        return att
+
+class myResNetRoI(nn.Module):
+    def __init__(self, resnet, if_fine_tune):
+        super(myResNetRoI, self).__init__()
+        self.resnet = resnet
+        self.if_fine_tune = if_fine_tune
+    def forward(self, x):
+        x = self.resnet.conv1(x); x = self.resnet.bn1(x); x = self.resnet.relu(x); x = self.resnet.maxpool(x)
+        x = self.resnet.layer1(x); x = self.resnet.layer2(x); x = self.resnet.layer3(x); x = self.resnet.layer4(x)
+        fc = x.mean(3).mean(2)
+        if not self.if_fine_tune: fc = Variable(fc.data)
+        return fc
 
 class TargetImageMatching(nn.Module):
     def __init__(self, hidden_size, num_heads, dropout=0.1):
-        super().__init__()
+        super(TargetImageMatching, self).__init__()
         self.mha = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(hidden_size); self.norm2 = nn.LayerNorm(hidden_size)
         self.feed_forward = nn.Sequential(nn.Linear(hidden_size, hidden_size * 4), nn.GELU(), nn.Linear(hidden_size * 4, hidden_size), nn.Dropout(dropout))
@@ -198,89 +203,60 @@ class TomBERT(nn.Module):
     def __init__(self, pretrained_path, num_labels=4):
         super(TomBERT, self).__init__()
         self.roberta = AutoModel.from_pretrained(pretrained_path)
-        # TomBERT gốc chia sẻ trọng số BERT cho cả text và target encoder (tiết kiệm VRAM)
-        self.s2_roberta = self.roberta 
-        
         config = self.roberta.config
         self.hidden_size = config.hidden_size
         
         self.vis_projection = nn.Linear(2048, self.hidden_size)
         self.roi_projection = nn.Linear(2048, self.hidden_size)
         
-        #Sửa range(5) thành range(1) để đúng cấu hình chuẩn của bài báo
-        self.ti_matching = nn.ModuleList([
-            TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) 
-            for _ in range(1) 
-        ])
-        
-        self.ent2img_pooler = BERTLikePooler(self.hidden_size)
-        
-        # Multimodal Encoder: Giữ nguyên 1 layer chuẩn
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=self.hidden_size, 
-            nhead=config.num_attention_heads, 
-            dim_feedforward=config.intermediate_size, 
-            dropout=config.hidden_dropout_prob, 
-            activation="gelu", 
-            batch_first=True
-        )
-        self.mm_encoder = nn.TransformerEncoder(enc_layer, num_layers=1)
+        # Best Config: L_t=5, L_m=4
+        self.ti_matching = nn.ModuleList([TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) for _ in range(1)])
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_size, nhead=config.num_attention_heads, dim_feedforward=config.intermediate_size, dropout=config.hidden_dropout_prob, activation="gelu", batch_first=True)
+        self.mm_encoder = nn.TransformerEncoder(encoder_layer, num_layers=1)
         
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(self.hidden_size, num_labels)
-        self.apply(self._init_custom_weights)
+        self.classifier = nn.Linear(self.hidden_size * 2, num_labels)
+        
+        self.apply_custom_init(self.classifier); self.apply_custom_init(self.vis_projection); self.apply_custom_init(self.roi_projection)
 
-    def _init_custom_weights(self, module):
+    def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=0.02)
             if module.bias is not None: module.bias.data.zero_()
         elif isinstance(module, nn.Embedding): module.weight.data.normal_(mean=0.0, std=0.02)
         elif isinstance(module, nn.LayerNorm): module.bias.data.zero_(); module.weight.data.fill_(1.0)
+    def apply_custom_init(self, module): module.apply(self._init_weights)
 
     def forward(self, target_ids, target_mask, sentence_ids, sentence_mask, visual_embeds_att, roi_embeds_att):
+        t_out = self.roberta(target_ids, attention_mask=target_mask)
+        h_t = t_out.last_hidden_state
         s_out = self.roberta(sentence_ids, attention_mask=sentence_mask)
         h_s = s_out.last_hidden_state
-        t_out = self.s2_roberta(target_ids, attention_mask=target_mask)
-        h_t = t_out.last_hidden_state
-        
+
         B, N_Img, Patches, Dim = visual_embeds_att.shape; _, _, N_Roi, _ = roi_embeds_att.shape
         vis_flat = visual_embeds_att.view(B, N_Img * Patches, Dim); roi_flat = roi_embeds_att.view(B, N_Img * N_Roi, Dim)
-        g_visual = torch.cat([self.vis_projection(vis_flat), self.roi_projection(roi_flat)], dim=1)
+        vis_proj = self.vis_projection(vis_flat); roi_proj = self.roi_projection(roi_flat)
+        g_visual = torch.cat([vis_proj, roi_proj], dim=1)
         
         h_v = h_t
         for layer in self.ti_matching: h_v = layer(target_feats=h_v, image_feats=g_visual)
-        h_v_pooled = self.ent2img_pooler(h_v).unsqueeze(1)
         
-        mm_input = torch.cat([h_v_pooled, h_s], dim=1)
+        # Multimodal Encoder
+        h_v_cls = h_v[:, 0:1, :]
+        mm_input = torch.cat([h_v_cls, h_s], dim=1)
+        
         bsz = sentence_mask.size(0)
         valid_cls = torch.ones(bsz, 1).to(sentence_mask.device)
         mm_mask = torch.cat([valid_cls, sentence_mask], dim=1)
+        src_key_padding_mask = (mm_mask == 0) 
         
-        h_mm = self.mm_encoder(mm_input, src_key_padding_mask=(mm_mask == 0))
-        logits = self.classifier(self.dropout(h_mm[:, 0, :]))
+        h_mm = self.mm_encoder(mm_input, src_key_padding_mask=src_key_padding_mask)
+        
+        out_vis = h_mm[:, 0, :]
+        out_txt = h_mm[:, 1, :]
+        pooled_output = torch.cat([out_vis, out_txt], dim=1)
+        logits = self.classifier(self.dropout(pooled_output))
         return logits
-
-class myResNetImg(nn.Module):
-    def __init__(self, resnet, if_fine_tune):
-        super().__init__()
-        self.resnet = resnet; self.if_fine_tune = if_fine_tune
-    def forward(self, x):
-        x = self.resnet.conv1(x); x = self.resnet.bn1(x); x = self.resnet.relu(x); x = self.resnet.maxpool(x)
-        x = self.resnet.layer1(x); x = self.resnet.layer2(x); x = self.resnet.layer3(x); x = self.resnet.layer4(x)
-        att = F.adaptive_avg_pool2d(x, [7, 7])
-        if not self.if_fine_tune: att = Variable(att.data)
-        return att
-
-class myResNetRoI(nn.Module):
-    def __init__(self, resnet, if_fine_tune):
-        super().__init__()
-        self.resnet = resnet; self.if_fine_tune = if_fine_tune
-    def forward(self, x):
-        x = self.resnet.conv1(x); x = self.resnet.bn1(x); x = self.resnet.relu(x); x = self.resnet.maxpool(x)
-        x = self.resnet.layer1(x); x = self.resnet.layer2(x); x = self.resnet.layer3(x); x = self.resnet.layer4(x)
-        fc = x.mean(3).mean(2)
-        if not self.if_fine_tune: fc = Variable(fc.data)
-        return fc
 
 # ==============================================================================
 # 4. MAIN
@@ -288,245 +264,273 @@ class myResNetRoI(nn.Module):
 
 def main():
     parser = argparse.ArgumentParser()
-    # Paths
     parser.add_argument("--data_dir", default='../vimacsa', type=str, required=True)
     parser.add_argument("--output_dir", default=None, type=str, required=True)
-    parser.add_argument('--image_dir', default='../vimacsa/image')
+    parser.add_argument('--image_dir', default='../vimacsa/image', help='path to images')
     parser.add_argument("--pretrained_hf_model", default="xlm-roberta-base", type=str)
-    
-    # Args
     parser.add_argument("--list_aspect", default=['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area'], nargs='+')
     parser.add_argument("--num_polarity", default=4, type=int)
     parser.add_argument("--num_imgs", default=3, type=int)
     parser.add_argument("--num_rois", default=7, type=int)
-    
-    # Training Params
-    parser.add_argument("--num_train_epochs", default=10.0, type=float)
+    parser.add_argument("--do_train", action='store_true')
+    parser.add_argument("--do_eval", action='store_true')
     parser.add_argument("--train_batch_size", default=8, type=int)
     parser.add_argument("--eval_batch_size", default=8, type=int)
     parser.add_argument("--learning_rate", default=2e-5, type=float)
+    parser.add_argument("--num_train_epochs", default=10.0, type=float)
     parser.add_argument("--warmup_proportion", default=0.1, type=float)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--fine_tune_cnn', action='store_true')
-    
-    # Actions
-    parser.add_argument("--do_train", action='store_true')
-    parser.add_argument("--do_eval", action='store_true')
     parser.add_argument("--no_cuda", action='store_true')
-    
+    parser.add_argument("--ddp", action='store_true', help="Use Distributed Data Parallel")
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
+    parser.add_argument("--resume_from_checkpoint", default=None, type=str)
     args = parser.parse_args()
     
-    # [FIX] Update batch size BEFORE creating DataLoader
-    if args.gradient_accumulation_steps < 1:
-        raise ValueError(f"Invalid gradient_accumulation_steps: {args.gradient_accumulation_steps}")
-    args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
-    
-    # Device
-    if args.no_cuda:
-        device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    # === DDP SETUP ===
+    if args.ddp:
+        assert torch.cuda.is_available(), "CUDA is required for DDP"
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(ddp_local_rank)
+        master_process = ddp_rank == 0
     else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Running on device: {device}")
+        ddp_rank = 0
+        ddp_local_rank = 0
+        ddp_world_size = 1
+        master_process = True
+        if args.no_cuda:
+            device = torch.device("cpu")
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if not os.path.exists(args.output_dir): os.makedirs(args.output_dir)
-        
-    logger.info("***** Running training *****")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Batch size (per device) = {args.train_batch_size}")
-    logger.info(f"  Grad Accum steps = {args.gradient_accumulation_steps}")
+    print(f"Running on device: {ddp_local_rank if args.ddp else device}")
     
+    # Init process group for DDP
+    if args.ddp and ddp_world_size > 1:
+        torch.distributed.init_process_group(backend='nccl')
+    
+    os.makedirs(args.output_dir, exist_ok=True)
+    if master_process:
+        logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO, handlers=[logging.FileHandler(f'{args.output_dir}/training_tombert.log'), logging.StreamHandler()])
+    logger = logging.getLogger(__name__)
+    
+    # [CRITICAL UPDATE] Điều chỉnh batch size theo gradient accumulation
+    if args.gradient_accumulation_steps < 1:
+        raise ValueError(f"Invalid gradient_accumulation_steps parameter: {args.gradient_accumulation_steps}, should be >= 1")
+
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
-    
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(args.seed)
+
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_hf_model)
     normalize_class = TextNormalize()
-    
-    roi_path = os.path.join(args.data_dir, "roi_data.csv")
-    if os.path.exists(roi_path):
-        roi_df = pd.read_csv(roi_path)
-    else:
-        roi_df = pd.DataFrame(columns=['file_name', 'x1', 'y1', 'x2', 'y2'])
+    ASPECT = args.list_aspect
 
-    model = TomBERT(args.pretrained_hf_model, num_labels=args.num_polarity).to(device)
+    roi_df = pd.read_csv(f"{args.data_dir}/roi_data.csv"); roi_df['file_name'] = roi_df['file_name'] + '.png'
+    with open(f'{args.data_dir}/resnet152_image_label.json') as imf: dict_image_aspect = json.load(imf)
+    with open(f'{args.data_dir}/resnet152_roi_label.json') as rf: dict_roi_aspect = json.load(rf)
+
+    # --- Load Data ---
+    if args.do_train:
+        train_data = pd.read_json(f'{args.data_dir}/train.json')
+        dev_data = pd.read_json(f'{args.data_dir}/dev.json')
+        train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
+        dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
+        
+        train_dataset = TomBERTDataset(train_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
+        dev_dataset = TomBERTDataset(dev_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
+
+    # --- Models ---
+    model = TomBERT(pretrained_path=args.pretrained_hf_model, num_labels=args.num_polarity)
+    model.to(device)
     
     img_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
     roi_res_model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V2).to(device)
-    resnet_img = myResNetImg(img_res_model, args.fine_tune_cnn).to(device)
-    resnet_roi = myResNetRoI(roi_res_model, args.fine_tune_cnn).to(device)
+    resnet_img = myResNetImg(resnet=img_res_model, if_fine_tune=args.fine_tune_cnn).to(device)
+    resnet_roi = myResNetRoI(resnet=roi_res_model, if_fine_tune=args.fine_tune_cnn).to(device)
+    
+    # === DDP Wrap Models ===
+    if args.ddp and ddp_world_size > 1:
+        model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
+        resnet_img = DDP(resnet_img, device_ids=[ddp_local_rank], find_unused_parameters=True)
+        resnet_roi = DDP(resnet_roi, device_ids=[ddp_local_rank], find_unused_parameters=True)
 
+    # --- Optimizer ---
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [{'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01}, {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+    criterion = torch.nn.CrossEntropyLoss()
+    scaler = GradScaler() if args.fp16 else None
+    
+    # Số bước train được tính dựa trên batch size ĐÃ CHIA (tức là số bước thực tế của loader) chia cho gradient accumulation
+    # Tuy nhiên, do ta đã chia args.train_batch_size ở trên rồi, nên train_loader sẽ dài gấp gradient_accumulation_steps lần.
+    # Vì vậy tổng số bước cập nhật optimizer vẫn là: len(loader) / gradient_accumulation_steps
+    num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs) if args.do_train else 0
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps * args.warmup_proportion), num_training_steps=num_train_steps)
+
+    start_epoch = 0; max_f1 = 0.0
+    if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint):
+        logger.info(f"Resuming from {args.resume_from_checkpoint}")
+        ckpt = torch.load(args.resume_from_checkpoint, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict']); scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        start_epoch = ckpt['epoch'] + 1; max_f1 = ckpt.get('best_score', 0.0)
+
+    # --- TRAINING LOOP (With TQDM Context Manager) ---
     if args.do_train:
-        train_df = pd.read_json(os.path.join(args.data_dir, 'train.json'))
-        dev_df = pd.read_json(os.path.join(args.data_dir, 'dev.json'))
-        
-        train_df['comment'] = train_df['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
-        dev_df['comment'] = dev_df['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
-        
-        train_dataset = TomBERTDataset(train_df, tokenizer, args.image_dir, roi_df, args.list_aspect, args.num_imgs, args.num_rois)
-        dev_dataset = TomBERTDataset(dev_df, tokenizer, args.image_dir, roi_df, args.list_aspect, args.num_imgs, args.num_rois)
-        
-        train_loader = DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
-        dev_loader = DataLoader(dev_dataset, batch_size=args.eval_batch_size, shuffle=False)
-        
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-        
-        total_steps = len(train_loader) // args.gradient_accumulation_steps * args.num_train_epochs
-        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(args.warmup_proportion*total_steps), num_training_steps=total_steps)
-        scaler = GradScaler() if args.fp16 else None
-        criterion = nn.CrossEntropyLoss()
-        
-        best_f1 = 0.0
-        
-        train_iterator = trange(int(args.num_train_epochs), desc="Epoch")
-        
-        for epoch in train_iterator:
+        train_loader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), batch_size=args.train_batch_size)
+        dev_loader = DataLoader(dev_dataset, sampler=SequentialSampler(dev_dataset), batch_size=args.eval_batch_size)
+
+        for epoch in range(start_epoch, int(args.num_train_epochs)):
+            logger.info(f"********** Epoch: {epoch} **********")
             model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
             
-            # Use TQDM Bar for Status, No extra prints
-            with tqdm(train_loader, desc=f"Epoch {epoch}", position=0, leave=True, dynamic_ncols=False, ncols=100) as tepoch:
+            # Sử dụng TQDM làm Context Manager giống run_multimodal_fcmf.py
+            with tqdm(train_loader, desc=f"Epoch {epoch}", dynamic_ncols=True) as tepoch:
                 for step, batch in enumerate(tepoch):
+                    batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                     t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
-                    t_img = t_img.to(device); roi_img = roi_img.to(device).float()
-                    tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
-                    sent_ids = sent_ids.to(device); sent_mask = sent_mask.to(device)
-                    labels = labels.to(device)
-                    
-                    with torch.amp.autocast('cuda', enabled=args.fp16):
-                        encoded_img = [resnet_img(t_img[:, i]).view(t_img.size(0), 2048, 49).permute(0, 2, 1) for i in range(t_img.shape[1])]
-                        vis_embeds = torch.stack(encoded_img, dim=1)
-                        
-                        encoded_roi = []
-                        for i in range(roi_img.shape[1]):
-                            rois_in_img = [resnet_roi(roi_img[:, i, r]) for r in range(roi_img.shape[2])]
-                            encoded_roi.append(torch.stack(rois_in_img, dim=1))
-                        roi_embeds = torch.stack(encoded_roi, dim=1)
-                        
+                    roi_img = roi_img.float()
+
+                    with autocast(enabled=args.fp16):
+                        encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
+                        encoded_roi = [torch.stack([resnet_roi(roi_img[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
+                        vis_embeds = torch.stack(encoded_img, dim=1); roi_embeds = torch.stack(encoded_roi, dim=1)
+
                         loss = 0
-                        for asp_idx in range(len(args.list_aspect)):
-                            logits = model(tgt_ids[:, asp_idx], tgt_mask[:, asp_idx], sent_ids[:, asp_idx], sent_mask[:, asp_idx], vis_embeds, roi_embeds)
-                            loss += criterion(logits, labels[:, asp_idx])
-                        loss = loss / args.gradient_accumulation_steps
-                    
-                    if args.fp16:
-                        scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
+                        for id_asp in range(len(ASPECT)):
+                            logits = model(target_ids=tgt_ids[:,id_asp,:], target_mask=tgt_mask[:,id_asp,:],
+                                           sentence_ids=sent_ids[:,id_asp,:], sentence_mask=sent_mask[:,id_asp,:],
+                                           visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
+                            loss += criterion(logits, labels[:,id_asp])
                         
+                        # [CRITICAL UPDATE] Chia loss cho gradient accumulation steps
+                        loss = loss / args.gradient_accumulation_steps
+
+                    if args.fp16: scaler.scale(loss).backward()
+                    else: loss.backward()
+
                     if (step + 1) % args.gradient_accumulation_steps == 0:
-                        if args.fp16: scaler.step(optimizer); scaler.update()
-                        else: optimizer.step()
+                        if args.fp16: scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); scaler.step(optimizer); scaler.update()
+                        else: torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
                         scheduler.step(); optimizer.zero_grad()
                     
-                    # Update bar with loss
-                    tepoch.set_postfix_str(f"loss={loss.item() * args.gradient_accumulation_steps:.2f}")
+                    # [CRITICAL UPDATE] Update progress bar với loss thực tế (nhân ngược lại)
+                    tepoch.set_postfix(loss=loss.item() * args.gradient_accumulation_steps)
             
-            # --- Eval (Compact logging) ---
-            model.eval(); resnet_img.eval(); resnet_roi.eval()
-            true_labels = {asp: [] for asp in args.list_aspect}
-            pred_labels = {asp: [] for asp in args.list_aspect}
-            
-            with torch.no_grad():
-                for batch in tqdm(dev_loader, desc="Eval", leave=False):
-                    t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
-                    t_img = t_img.to(device); roi_img = roi_img.to(device).float()
-                    tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
-                    sent_ids = sent_ids.to(device); sent_mask = sent_mask.to(device)
-                    
-                    encoded_img = [resnet_img(t_img[:, i]).view(t_img.size(0), 2048, 49).permute(0, 2, 1) for i in range(t_img.shape[1])]
-                    vis_embeds = torch.stack(encoded_img, dim=1)
-                    encoded_roi = []
-                    for i in range(roi_img.shape[1]):
-                        rois_in_img = [resnet_roi(roi_img[:, i, r]) for r in range(roi_img.shape[2])]
-                        encoded_roi.append(torch.stack(rois_in_img, dim=1))
-                    roi_embeds = torch.stack(encoded_roi, dim=1)
-                    
-                    for asp_idx, asp_name in enumerate(args.list_aspect):
-                        logits = model(tgt_ids[:, asp_idx], tgt_mask[:, asp_idx], sent_ids[:, asp_idx], sent_mask[:, asp_idx], vis_embeds, roi_embeds)
-                        preds = torch.argmax(logits, dim=1).cpu().numpy()
-                        true_labels[asp_name].extend(labels[:, asp_idx].numpy())
-                        pred_labels[asp_name].extend(preds)
-            
-            f1_scores = [macro_f1(true_labels[asp], pred_labels[asp])[2] for asp in args.list_aspect]
-            avg_f1 = np.mean(f1_scores)
-            
-            # Print F1 cleanly
-            tqdm.write(f"Epoch {epoch} | Dev F1: {avg_f1:.4f}")
-            
-            if avg_f1 > best_f1:
-                best_f1 = avg_f1
-                tqdm.write(f">> New Best F1: {best_f1:.4f}")
-                save_model(os.path.join(args.output_dir, 'tombert_best.pth'), model, optimizer, scheduler, epoch, best_f1, scaler)
+            # Log LR cuối epoch
+            current_lr = optimizer.param_groups[0]['lr']
+            logger.info(f"Epoch {epoch} Completed. Current LR: {current_lr:.2e}")
 
+            # --- Eval ---
+            if args.do_eval:
+                model.eval()
+                true_label, pred_label = {asp:[] for asp in ASPECT}, {asp:[] for asp in ASPECT}
+                with torch.no_grad():
+                    for batch in tqdm(dev_loader, desc="Evaluating Dev", leave=False):
+                        batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
+                        t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
+                        roi_img = roi_img.float()
+                        encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
+                        encoded_roi = [torch.stack([resnet_roi(roi_img[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
+                        vis_embeds = torch.stack(encoded_img, dim=1); roi_embeds = torch.stack(encoded_roi, dim=1)
+
+                        for id_asp in range(len(ASPECT)):
+                            logits = model(target_ids=tgt_ids[:,id_asp,:], target_mask=tgt_mask[:,id_asp,:],
+                                           sentence_ids=sent_ids[:,id_asp,:], sentence_mask=sent_mask[:,id_asp,:],
+                                           visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
+                            pred_label[ASPECT[id_asp]].append(np.argmax(logits.cpu().numpy(), axis=-1))
+                            true_label[ASPECT[id_asp]].append(labels[:,id_asp].cpu().numpy())
+
+                total_f1 = 0
+                for asp in ASPECT:
+                    _, _, f1 = macro_f1(np.concatenate(true_label[asp]), np.concatenate(pred_label[asp]))
+                    total_f1 += f1
+                avg_f1 = total_f1 / len(ASPECT)
+                logger.info(f"  Dev Macro F1: {avg_f1}")
+                if avg_f1 > max_f1:
+                    max_f1 = avg_f1
+                    save_model(f'{args.output_dir}/tombert_best.pth', model, optimizer, scheduler, epoch, max_f1, scaler)
+
+    # --- TEST ---
     if args.do_eval:
-        logger.info("\n=== STARTING TEST ===")
-        best_path = os.path.join(args.output_dir, 'tombert_best.pth')
+        logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
+        test_data = pd.read_json(f'{args.data_dir}/test.json')
+        test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
+        test_dataset = TomBERTDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
+        test_loader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
+
+        best_path = f'{args.output_dir}/tombert_best.pth'
         if os.path.exists(best_path):
+            logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
-            logger.info(f"Loaded Best F1: {checkpoint['best_score']}")
-            
-        test_df = pd.read_json(os.path.join(args.data_dir, 'test.json'))
-        test_df['comment'] = test_df['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
-        test_dataset = TomBERTDataset(test_df, tokenizer, args.image_dir, roi_df, args.list_aspect, args.num_imgs, args.num_rois)
-        test_loader = DataLoader(test_dataset, batch_size=args.eval_batch_size, shuffle=False)
-        
+        else: logger.warning("No best model found! Using current weights.")
+
         model.eval(); resnet_img.eval(); resnet_roi.eval()
-        test_true = {asp: [] for asp in args.list_aspect}
-        test_pred = {asp: [] for asp in args.list_aspect}
+        true_label_list = {asp:[] for asp in ASPECT}
+        pred_label_list = {asp:[] for asp in ASPECT}
         formatted_results = []
-        
+
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Testing"):
-                t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, batch_texts = batch
-                t_img = t_img.to(device); roi_img = roi_img.to(device).float()
-                tgt_ids = tgt_ids.to(device); tgt_mask = tgt_mask.to(device)
-                sent_ids = sent_ids.to(device); sent_mask = sent_mask.to(device)
-                
-                encoded_img = [resnet_img(t_img[:, i]).view(t_img.size(0), 2048, 49).permute(0, 2, 1) for i in range(t_img.shape[1])]
-                vis_embeds = torch.stack(encoded_img, dim=1)
-                encoded_roi = []
-                for i in range(roi_img.shape[1]):
-                    rois_in_img = [resnet_roi(roi_img[:, i, r]) for r in range(roi_img.shape[2])]
-                    encoded_roi.append(torch.stack(rois_in_img, dim=1))
-                roi_embeds = torch.stack(encoded_roi, dim=1)
-                
+                batch_texts = batch[-1]
+                batch_tensors = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch[:-1])
+                t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels = batch_tensors
+                roi_img = roi_img.float()
+
+                encoded_img = [resnet_img(t_img[:,i,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) for i in range(args.num_imgs)]
+                encoded_roi = [torch.stack([resnet_roi(roi_img[:,i,r,:]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
+                vis_embeds = torch.stack(encoded_img, dim=1); roi_embeds = torch.stack(encoded_roi, dim=1)
+
                 batch_logs = [{"text": t, "aspects": {}} for t in batch_texts]
-                
-                for asp_idx, asp_name in enumerate(args.list_aspect):
-                    logits = model(tgt_ids[:, asp_idx], tgt_mask[:, asp_idx], sent_ids[:, asp_idx], sent_mask[:, asp_idx], vis_embeds, roi_embeds)
-                    preds = torch.argmax(logits, dim=1).cpu().numpy()
-                    test_true[asp_name].extend(labels[:, asp_idx].numpy())
-                    test_pred[asp_name].extend(preds)
+
+                for id_asp in range(len(ASPECT)):
+                    logits = model(target_ids=tgt_ids[:,id_asp,:], target_mask=tgt_mask[:,id_asp,:],
+                                   sentence_ids=sent_ids[:,id_asp,:], sentence_mask=sent_mask[:,id_asp,:],
+                                   visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
+                    preds = np.argmax(logits.cpu().numpy(), axis=-1)
+                    true_labels = labels[:,id_asp].cpu().numpy()
                     
-                    for i, (p, l) in enumerate(zip(preds, labels[:, asp_idx].numpy())):
-                        batch_logs[i]["aspects"][asp_name] = {"predict": POLARITY_MAP[p], "label": POLARITY_MAP[l]}
+                    true_label_list[ASPECT[id_asp]].append(true_labels)
+                    pred_label_list[ASPECT[id_asp]].append(preds)
+
+                    for i, (p, l) in enumerate(zip(preds, true_labels)):
+                        batch_logs[i]["aspects"][ASPECT[id_asp]] = {"predict": POLARITY_MAP.get(p, "Unknown"), "label": POLARITY_MAP.get(l, "Unknown")}
+                
                 formatted_results.extend(batch_logs)
-        
-        result_str = "\n***** Test Results *****\n"
-        avg_f1 = 0
-        for asp in args.list_aspect:
-            p, r, f1 = macro_f1(test_true[asp], test_pred[asp])
-            avg_f1 += f1
-            result_str += f"{asp:<15} | F1: {f1:.4f} | P: {p:.4f} | R: {r:.4f}\n"
-        
-        avg_f1 /= len(args.list_aspect)
-        result_str += "-"*40 + f"\nAVERAGE MACRO F1: {avg_f1:.4f}\n"
-        
-        logger.info(result_str)
-        with open(os.path.join(args.output_dir, 'test_results.txt'), 'w') as f: f.write(result_str)
-        
-        log_path = os.path.join(args.output_dir, "test_predictions_formatted.txt")
-        with open(log_path, "w", encoding="utf-8") as f:
+
+        # Save Metrics
+        with open(os.path.join(args.output_dir, "test_results_tombert.txt"), "w") as writer:
+            writer.write("***** Test results *****\n")
+            all_f1 = 0
+            for asp in ASPECT:
+                tr = np.concatenate(true_label_list[asp])
+                pr = np.concatenate(pred_label_list[asp])
+                p, r, f1 = macro_f1(tr, pr)
+                all_f1 += f1
+                writer.write(f"{asp} - P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}\n")
+            avg_f1 = all_f1 / len(ASPECT)
+            writer.write(f"Average F1: {avg_f1:.4f}\n")
+            logger.info(f"Test Average F1: {avg_f1:.4f}")
+
+        # Save Logs
+        with open(f"{args.output_dir}/test_predictions_formatted.txt", "w", encoding="utf-8") as f:
             f.write(f"TEST DETAILED PREDICTIONS\nAverage Macro F1: {avg_f1:.4f}\n{'='*50}\n\n")
             for i, sample in enumerate(formatted_results):
                 f.write("{\n")
                 f.write(f"Sentence {i}: {sample['text']}\n")
-                for asp in args.list_aspect:
+                for asp in ASPECT:
                     res = sample['aspects'].get(asp, {'predict': 'N/A', 'label': 'N/A'})
                     f.write(f"   {asp}: Predict: {res['predict']}, Label: {res['label']}\n")
                 f.write("}\n")
-        logger.info(f"Detailed predictions saved to {log_path}")
+        logger.info(f"Saved predictions to {args.output_dir}")
 
 if __name__ == '__main__':
     main()
