@@ -404,7 +404,7 @@ def main():
                         scheduler.step(); optimizer.zero_grad()
                     
                     # Update bar with loss
-                    tepoch.set_postfix_str(f"loss={loss.item() * args.gradient_accumulation_steps:.4f}")
+                    tepoch.set_postfix_str(f"loss={loss.item() * args.gradient_accumulation_steps:.2f}")
             
             # --- Eval (Compact logging) ---
             model.eval(); resnet_img.eval(); resnet_roi.eval()
