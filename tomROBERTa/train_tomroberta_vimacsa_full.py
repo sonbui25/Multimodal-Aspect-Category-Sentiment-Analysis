@@ -205,11 +205,11 @@ class TomBERT(nn.Module):
         self.vis_projection = nn.Linear(2048, self.hidden_size)
         self.roi_projection = nn.Linear(2048, self.hidden_size)
         
-        self.ti_matching = nn.ModuleList([TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) for _ in range(5)])
+        self.ti_matching = nn.ModuleList([TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) for _ in range(1)])
         self.ent2img_pooler = BERTLikePooler(self.hidden_size)
         
         enc_layer = nn.TransformerEncoderLayer(d_model=self.hidden_size, nhead=config.num_attention_heads, dim_feedforward=config.intermediate_size, dropout=config.hidden_dropout_prob, activation="gelu", batch_first=True)
-        self.mm_encoder = nn.TransformerEncoder(enc_layer, num_layers=4)
+        self.mm_encoder = nn.TransformerEncoder(enc_layer, num_layers=1)
         
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(self.hidden_size, num_labels)
