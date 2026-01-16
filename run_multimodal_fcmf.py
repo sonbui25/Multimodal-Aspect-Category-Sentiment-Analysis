@@ -237,9 +237,9 @@ def main():
         if master_process:
             logger.info("FCMFEncoder has been FROZEN! Only Classifier Head will be trained.")
     if args.ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
-        resnet_img = DDP(resnet_img, device_ids=[ddp_local_rank])
-        resnet_roi = DDP(resnet_roi, device_ids=[ddp_local_rank])
+        model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
+        resnet_img = DDP(resnet_img, device_ids=[ddp_local_rank], find_unused_parameters=True)
+        resnet_roi = DDP(resnet_roi, device_ids=[ddp_local_rank], find_unused_parameters=True)
     elif torch.cuda.device_count() > 1 and not args.ddp:
         model = torch.nn.DataParallel(model)
         resnet_img = torch.nn.DataParallel(resnet_img)
