@@ -198,17 +198,32 @@ class TomBERT(nn.Module):
     def __init__(self, pretrained_path, num_labels=4):
         super(TomBERT, self).__init__()
         self.roberta = AutoModel.from_pretrained(pretrained_path)
-        self.s2_roberta = AutoModel.from_pretrained(pretrained_path) 
+        # TomBERT gốc chia sẻ trọng số BERT cho cả text và target encoder (tiết kiệm VRAM)
+        self.s2_roberta = self.roberta 
+        
         config = self.roberta.config
         self.hidden_size = config.hidden_size
         
         self.vis_projection = nn.Linear(2048, self.hidden_size)
         self.roi_projection = nn.Linear(2048, self.hidden_size)
         
-        self.ti_matching = nn.ModuleList([TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) for _ in range(5)])
+        #Sửa range(5) thành range(1) để đúng cấu hình chuẩn của bài báo
+        self.ti_matching = nn.ModuleList([
+            TargetImageMatching(self.hidden_size, config.num_attention_heads, config.attention_probs_dropout_prob) 
+            for _ in range(1) 
+        ])
+        
         self.ent2img_pooler = BERTLikePooler(self.hidden_size)
         
-        enc_layer = nn.TransformerEncoderLayer(d_model=self.hidden_size, nhead=config.num_attention_heads, dim_feedforward=config.intermediate_size, dropout=config.hidden_dropout_prob, activation="gelu", batch_first=True)
+        # Multimodal Encoder: Giữ nguyên 1 layer chuẩn
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_size, 
+            nhead=config.num_attention_heads, 
+            dim_feedforward=config.intermediate_size, 
+            dropout=config.hidden_dropout_prob, 
+            activation="gelu", 
+            batch_first=True
+        )
         self.mm_encoder = nn.TransformerEncoder(enc_layer, num_layers=1)
         
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
