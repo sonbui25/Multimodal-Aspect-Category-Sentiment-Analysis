@@ -447,9 +447,13 @@ def main():
                             asp_sent_mask = sent_mask[:,id_asp,:].clone()
                             asp_labels = labels[:,id_asp]
                             
+                            # Clone visual embeddings to prevent in-place modifications
+                            asp_vis_embeds = vis_embeds.clone()
+                            asp_roi_embeds = roi_embeds.clone()
+                            
                             logits = model(target_ids=asp_tgt_ids, target_mask=asp_tgt_mask,
                                            sentence_ids=asp_sent_ids, sentence_mask=asp_sent_mask,
-                                           visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
+                                           visual_embeds_att=asp_vis_embeds, roi_embeds_att=asp_roi_embeds)
                             loss = criterion(logits, asp_labels)
                             all_asp_loss = all_asp_loss + loss
 
@@ -510,9 +514,13 @@ def main():
                             asp_sent_mask = sent_mask[:,id_asp,:].clone()
                             asp_labels = labels[:,id_asp]
                             
+                            # Clone visual embeddings to prevent issues
+                            asp_vis_embeds = vis_embeds.clone()
+                            asp_roi_embeds = roi_embeds.clone()
+                            
                             logits = model(target_ids=asp_tgt_ids, target_mask=asp_tgt_mask,
                                            sentence_ids=asp_sent_ids, sentence_mask=asp_sent_mask,
-                                           visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
+                                           visual_embeds_att=asp_vis_embeds, roi_embeds_att=asp_roi_embeds)
                             pred_label[ASPECT[id_asp]].append(np.argmax(logits.cpu().numpy(), axis=-1))
                             true_label[ASPECT[id_asp]].append(asp_labels.cpu().numpy())
 
@@ -580,9 +588,13 @@ def main():
                     asp_sent_mask = sent_mask[:,id_asp,:].clone()
                     asp_labels = labels[:,id_asp]
                     
+                    # Clone visual embeddings to prevent issues
+                    asp_vis_embeds = vis_embeds.clone()
+                    asp_roi_embeds = roi_embeds.clone()
+                    
                     logits = model(target_ids=asp_tgt_ids, target_mask=asp_tgt_mask,
                                    sentence_ids=asp_sent_ids, sentence_mask=asp_sent_mask,
-                                   visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
+                                   visual_embeds_att=asp_vis_embeds, roi_embeds_att=asp_roi_embeds)
                     preds = np.argmax(logits.cpu().numpy(), axis=-1)
                     true_labels = asp_labels.cpu().numpy()
                     
