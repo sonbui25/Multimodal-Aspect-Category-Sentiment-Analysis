@@ -19,7 +19,7 @@ def swish(x):
     return x * torch.sigmoid(x)
 
 HIDDEN_SIZE=768 # for base model, set to 1024 for large model
-NUM_HIDDEN_LAYERS=6
+NUM_HIDDEN_LAYERS=12
 NUM_ATTENTION_HEADS=12 
 INTERMEDIATE_SIZE=3072
 HIDDEN_ACT="gelu"
