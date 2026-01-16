@@ -19,7 +19,7 @@ def swish(x):
     return x * torch.sigmoid(x)
 
 HIDDEN_SIZE=768 # for base model, set to 1024 for large model
-NUM_HIDDEN_LAYERS=12
+NUM_HIDDEN_LAYERS=6
 NUM_ATTENTION_HEADS=12 
 INTERMEDIATE_SIZE=3072
 HIDDEN_ACT="gelu"
@@ -365,7 +365,7 @@ class MultimodalEncoder(nn.Module):
     def __init__(self):
         super(MultimodalEncoder, self).__init__()
         layer = BertLayer()
-        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(1)])
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(NUM_HIDDEN_LAYERS)])
 
     def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
         all_encoder_layers = []
@@ -381,7 +381,7 @@ class BertCrossEncoder(nn.Module):
     def __init__(self):
         super(BertCrossEncoder, self).__init__()
         layer = BertCrossAttentionLayer()
-        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(1)])
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(NUM_HIDDEN_LAYERS)])
 
     def forward(self, s1_hidden_states, s2_hidden_states, s2_attention_mask, output_all_encoded_layers=True):
         all_encoder_layers = []
