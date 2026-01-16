@@ -46,7 +46,7 @@ def save_model(path, model, optimizer, scheduler, epoch, best_score=0.0, scaler=
     torch.save(checkpoint_dict, path)
 
 # ==============================================================================
-# 2. DATASET (TomBERT Specific)
+# 2. DATASET
 # ==============================================================================
 
 class TomBERTDataset(Dataset):
@@ -156,7 +156,7 @@ class TomBERTDataset(Dataset):
                torch.tensor(out_labels), text
 
 # ==============================================================================
-# 3. MODELS (TomBERT)
+# 3. MODELS
 # ==============================================================================
 
 class myResNetImg(nn.Module):
@@ -225,25 +225,16 @@ class TomBERT(nn.Module):
     def apply_custom_init(self, module): module.apply(self._init_weights)
 
     def forward(self, target_ids, target_mask, sentence_ids, sentence_mask, visual_embeds_att, roi_embeds_att):
-        # --- BATCH FOLDING FIX FOR DDP ---
-        # Input shapes: 
-        # target_ids: (B, Num_Asp, Seq_Len)
-        # visual_embeds_att: (B, Num_Img, 49, 2048)
-        
         B, Num_Asp, Seq_Len = target_ids.shape
         
-        # 1. Flatten Aspect Dimension: (B * Num_Asp, Seq_Len)
         flat_target_ids = target_ids.view(-1, Seq_Len)
         flat_target_mask = target_mask.view(-1, Seq_Len)
-        flat_sentence_ids = sentence_ids.view(-1, 170) # Max len 170 defined in dataset
+        flat_sentence_ids = sentence_ids.view(-1, 170)
         flat_sentence_mask = sentence_mask.view(-1, 170)
         
-        # 2. Flatten & Repeat Image Features
-        # visual_embeds: (B, Num_Img, 49, 2048) -> need (B * Num_Asp, Num_Img, 49, 2048)
         flat_visual_embeds = visual_embeds_att.repeat_interleave(Num_Asp, dim=0)
         flat_roi_embeds = roi_embeds_att.repeat_interleave(Num_Asp, dim=0)
         
-        # 3. Forward Pass (Vectorized)
         t_out = self.roberta(flat_target_ids, attention_mask=flat_target_mask)
         h_t = t_out.last_hidden_state
         s_out = self.roberta(flat_sentence_ids, attention_mask=flat_sentence_mask)
@@ -260,14 +251,11 @@ class TomBERT(nn.Module):
         g_visual = torch.cat([vis_proj, roi_proj], dim=1)
         
         h_v = h_t
-        for layer in self.ti_matching: 
-            h_v = layer(target_feats=h_v, image_feats=g_visual)
+        for layer in self.ti_matching: h_v = layer(target_feats=h_v, image_feats=g_visual)
         
-        # Multimodal Encoder
         h_v_cls = h_v[:, 0:1, :]
         mm_input = torch.cat([h_v_cls, h_s], dim=1)
         
-        # Masking
         valid_cls = torch.ones(B_flat, 1).to(flat_sentence_mask.device)
         mm_mask = torch.cat([valid_cls, flat_sentence_mask], dim=1)
         src_key_padding_mask = (mm_mask == 0) 
@@ -279,7 +267,6 @@ class TomBERT(nn.Module):
         pooled_output = torch.cat([out_vis, out_txt], dim=1)
         logits = self.classifier(self.dropout(pooled_output))
         
-        # Logits: (B * Num_Asp, Num_Classes)
         return logits
 
 # ==============================================================================
@@ -338,11 +325,7 @@ def main():
         logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s', datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO, handlers=[logging.FileHandler(f'{args.output_dir}/training_tombert.log'), logging.StreamHandler()])
     logger = logging.getLogger(__name__)
     
-    # [MATCHING FCMF LOGIC] Batch Size Calculation
-    if args.gradient_accumulation_steps < 1:
-        raise ValueError("Invalid gradient_accumulation_steps parameter")
-    
-    # Chia batch size cho accumulation steps giống FCMF
+    if args.gradient_accumulation_steps < 1: raise ValueError("Invalid gradient_accumulation_steps parameter")
     args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -388,9 +371,12 @@ def main():
     criterion = torch.nn.CrossEntropyLoss()
     scaler = GradScaler() if args.fp16 else None
     
+    # [CRITICAL FIX] Correct Step Calculation for DDP
     num_train_steps = 0
     if args.do_train:
-        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+        dataset_len = len(train_dataset)
+        if args.ddp: dataset_len = dataset_len // ddp_world_size  # Split dataset size for DDP
+        num_train_steps = int(dataset_len / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
     
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps * args.warmup_proportion), num_training_steps=num_train_steps)
 
@@ -401,6 +387,15 @@ def main():
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict']); scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_epoch = ckpt['epoch'] + 1; max_f1 = ckpt.get('best_score', 0.0)
+
+    # Log Config
+    if master_process and args.do_train:
+        steps_per_epoch = int(num_train_steps / args.num_train_epochs)
+        logger.info("="*60)
+        logger.info("TRAINING CONFIGURATION:")
+        logger.info(f"  Total steps: {num_train_steps}")
+        logger.info(f"  Steps per epoch: {steps_per_epoch}")
+        logger.info("="*60)
 
     # --- TRAINING LOOP ---
     if args.do_train:
@@ -433,15 +428,26 @@ def main():
                     roi_embeds = torch.stack(encoded_roi, dim=1)
 
                     with autocast(enabled=args.fp16):
-                        # [FIXED LOOP] Pass EVERYTHING at once
-                        # Model internally flattens (Batch * Aspects)
                         logits = model(target_ids=tgt_ids, target_mask=tgt_mask,
                                        sentence_ids=sent_ids, sentence_mask=sent_mask,
                                        visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
                         
-                        # Labels: (B, Num_Asp) -> (B * Num_Asp)
                         flat_labels = labels.view(-1)
-                        loss = criterion(logits, flat_labels)
+                        
+                        # [CRITICAL FIX] Exact FCMF Loss Logic: Sum(Mean_Batch_Loss_Per_Aspect)
+                        # 1. Calculate loss per sample (reduction='none') -> shape [Batch * 6]
+                        loss_per_sample = F.cross_entropy(logits, flat_labels, reduction='none')
+                        
+                        # 2. Reshape to [Batch, 6]
+                        # We use 'view' because the batch is constructed by repeating aspects sequentially
+                        batch_size_curr = logits.size(0) // len(ASPECT)
+                        loss_per_sample = loss_per_sample.view(batch_size_curr, len(ASPECT))
+                        
+                        # 3. Mean over Batch dimension -> shape [6] (Average loss for each aspect)
+                        loss_per_aspect = loss_per_sample.mean(dim=0)
+                        
+                        # 4. Sum over Aspects -> scalar (Total loss)
+                        loss = loss_per_aspect.sum()
 
                         if args.gradient_accumulation_steps > 1:
                             loss = loss / args.gradient_accumulation_steps
@@ -469,7 +475,6 @@ def main():
                         t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels, _ = batch
                         roi_img = roi_img.float()
                         
-                        # Feature Extraction
                         encoded_img = []
                         for img_idx in range(args.num_imgs):
                             img_f = resnet_img(t_img[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
@@ -481,18 +486,14 @@ def main():
                         vis_embeds = torch.stack(encoded_img, dim=1)
                         roi_embeds = torch.stack(encoded_roi, dim=1)
 
-                        # Vectorized Forward
                         logits = model(target_ids=tgt_ids, target_mask=tgt_mask,
                                        sentence_ids=sent_ids, sentence_mask=sent_mask,
                                        visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
                         
                         preds = np.argmax(logits.cpu().numpy(), axis=-1)
                         lbls = labels.view(-1).cpu().numpy()
-                        
-                        true_label.extend(lbls)
-                        pred_label.extend(preds)
+                        true_label.extend(lbls); pred_label.extend(preds)
 
-                # Calculate Macro F1 (Flattened)
                 _, _, avg_f1 = macro_f1(true_label, pred_label)
                 logger.info(f"  Dev Macro F1: {avg_f1}")
                 if avg_f1 > max_f1:
@@ -502,94 +503,61 @@ def main():
     # --- TEST ---
     if args.do_eval and master_process:
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
-        
-        # 1. Load Test Data
         test_data = pd.read_json(f'{args.data_dir}/test.json')
         test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(convert_unicode(x)))
         test_dataset = TomBERTDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_loader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
-        # 2. Load Best Model Checkpoint
         best_path = f'{args.output_dir}/tombert_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device)
-            # Handle DDP loading (unwrap wrapper if needed)
-            if hasattr(model, 'module'):
-                model.module.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            logger.warning("No best model found! Using current weights from end of training.")
+            if hasattr(model, 'module'): model.module.load_state_dict(checkpoint['model_state_dict'])
+            else: model.load_state_dict(checkpoint['model_state_dict'])
+        else: logger.warning("No best model found! Using current weights.")
 
         model.eval(); resnet_img.eval(); resnet_roi.eval()
-
         true_label_list = {asp:[] for asp in ASPECT}
         pred_label_list = {asp:[] for asp in ASPECT}
-        formatted_results = [] # To store detailed logs per sentence
+        formatted_results = [] 
 
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Testing"):
-                # Extract raw text for logging (last element in batch)
                 batch_texts = batch[-1]
-                
-                # Move tensors to device
                 batch_tensors = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch[:-1])
                 t_img, roi_img, tgt_ids, tgt_mask, sent_ids, sent_mask, labels = batch_tensors
                 roi_img = roi_img.float()
 
-                # --- Feature Extraction (Same as Train) ---
                 encoded_img = []
                 for img_idx in range(args.num_imgs):
                     img_f = resnet_img(t_img[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
                     encoded_img.append(img_f)
-                
                 encoded_roi = []
                 for img_idx in range(args.num_imgs):
                     roi_list = [resnet_roi(roi_img[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
                     encoded_roi.append(torch.stack(roi_list, dim=1))
-                
-                vis_embeds = torch.stack(encoded_img, dim=1)
-                roi_embeds = torch.stack(encoded_roi, dim=1)
+                vis_embeds = torch.stack(encoded_img, dim=1); roi_embeds = torch.stack(encoded_roi, dim=1)
 
-                # --- Vectorized Forward Pass ---
-                # Model inputs are flattened internally or we pass them directly 
-                # (Note: The corrected TomBERT model provided handles flattening internally inside forward)
                 logits = model(target_ids=tgt_ids, target_mask=tgt_mask,
                                sentence_ids=sent_ids, sentence_mask=sent_mask,
                                visual_embeds_att=vis_embeds, roi_embeds_att=roi_embeds)
                 
-                # logits shape is (Batch * Num_Aspects, Num_Classes)
-                # We need to reshape back to (Batch, Num_Aspects, Num_Classes) to log per sentence
+                # Reshape back to [Batch, Aspects, Classes] for logging
                 batch_size_curr = t_img.size(0)
-                num_aspects = len(ASPECT)
-                logits = logits.view(batch_size_curr, num_aspects, -1)
-                
-                # Get Predictions & Labels
-                preds = np.argmax(logits.cpu().numpy(), axis=-1)   # Shape: [Batch, Num_Aspects]
-                true_labels = labels.cpu().numpy()                 # Shape: [Batch, Num_Aspects]
+                logits = logits.view(batch_size_curr, len(ASPECT), -1)
+                preds = np.argmax(logits.cpu().numpy(), axis=-1)
+                true_labels = labels.cpu().numpy()
 
-                # --- Collect Results ---
-                # Initialize log entry for each sentence in batch
                 batch_logs = [{"text": t, "aspects": {}} for t in batch_texts]
-
                 for aspect_idx, aspect_name in enumerate(ASPECT):
-                    # 1. Aggregate for Metrics Calculation
                     true_label_list[aspect_name].append(true_labels[:, aspect_idx])
                     pred_label_list[aspect_name].append(preds[:, aspect_idx])
-                    
-                    # 2. Detailed Logging (Group by Sentence)
                     for sample_idx in range(batch_size_curr):
-                        p = preds[sample_idx, aspect_idx]
-                        l = true_labels[sample_idx, aspect_idx]
-                        batch_logs[sample_idx]["aspects"][aspect_name] = {
-                            "predict": POLARITY_MAP.get(p, "Unknown"),
-                            "label": POLARITY_MAP.get(l, "Unknown")
-                        }
-                
+                        p = preds[sample_idx, aspect_idx]; l = true_labels[sample_idx, aspect_idx]
+                        batch_logs[sample_idx]["aspects"][aspect_name] = {"predict": POLARITY_MAP.get(p, "Unknown"), "label": POLARITY_MAP.get(l, "Unknown")}
                 formatted_results.extend(batch_logs)
 
-        # 3. Calculate & Save Metrics (Identical format to FCMF)
+        # Save Metrics
         output_eval_file = os.path.join(args.output_dir, "test_results_tombert.txt")
         with open(output_eval_file, "w") as writer:
             writer.write("***** Test results *****\n")
@@ -597,32 +565,24 @@ def main():
             for asp in ASPECT:
                 tr = np.concatenate(true_label_list[asp])
                 pr = np.concatenate(pred_label_list[asp])
-                precision, recall, f1 = macro_f1(tr, pr)
+                p, r, f1 = macro_f1(tr, pr)
                 all_f1 += f1
-                writer.write(f"{asp} - P: {precision:.4f}, R: {recall:.4f}, F1: {f1:.4f}\n")
+                writer.write(f"{asp} - P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}\n")
                 logger.info(f"{asp} - F1: {f1:.4f}")
-            
             avg_f1 = all_f1 / len(ASPECT)
             writer.write(f"Average F1: {avg_f1:.4f}\n")
             logger.info(f"Average F1: {avg_f1:.4f}")
 
-        # 4. Save Formatted Detailed Log (Identical format to FCMF)
+        # Save Logs
         log_path = f"{args.output_dir}/test_predictions_formatted.txt"
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"TEST DETAILED PREDICTIONS\n")
-            f.write(f"Average Macro F1: {avg_f1:.4f}\n")
-            f.write("="*50 + "\n\n")
-            
+            f.write(f"TEST DETAILED PREDICTIONS\nAverage Macro F1: {avg_f1:.4f}\n{'='*50}\n\n")
             for i, sample in enumerate(formatted_results):
-                f.write("{\n")
-                f.write(f"Sentence {i}: {sample['text']}\n")
+                f.write("{\n"); f.write(f"Sentence {i}: {sample['text']}\n")
                 for asp in ASPECT:
                     res = sample['aspects'].get(asp, {'predict': 'N/A', 'label': 'N/A'})
-                    f.write(f"{asp}:\n")
-                    f.write(f"   predict: {res['predict']}\n")
-                    f.write(f"   label:   {res['label']}\n")
+                    f.write(f"{asp}:\n   predict: {res['predict']}\n   label:   {res['label']}\n")
                 f.write("}\n")
-        
         logger.info(f"Formatted predictions saved to {log_path}")
 
 if __name__ == '__main__':
