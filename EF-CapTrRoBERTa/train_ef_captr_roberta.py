@@ -83,7 +83,6 @@ class EFCapDataset(Dataset):
         existing_aspects = {}
         for item in text_img_label:
             asp, pol = item.split("#")
-            if "_" in asp: asp = "Public area"
             existing_aspects[asp] = pol
 
         input_ids_list, mask_list, label_list = [], [], []
