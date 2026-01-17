@@ -430,6 +430,38 @@ def main():
             if args.ddp: train_sampler.set_epoch(train_idx)
             if master_process: logger.info(f"********** Epoch: {train_idx} **********")
             
+            # === GIAI ĐOẠN 1: FREEZE (Trong epoch đầu tiên) ===
+            if train_idx == 0:
+                if master_process: logger.info(">>> Giai đoạn 1: Đóng băng Encoder để train Classifier Head...")
+                # Đóng băng BERT và ResNet
+                for param in model.bert.parameters():
+                    param.requires_grad = False
+                for param in resnet_img.parameters():
+                    param.requires_grad = False
+                for param in resnet_roi.parameters():
+                    param.requires_grad = False
+                    
+                # Set LR cao cho Head (ví dụ 1e-3)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = 1e-3 
+                if master_process: logger.info(f"    LR set to 1e-3 for Classifier Head training")
+
+            # === GIAI ĐOẠN 2: UNFREEZE (Từ epoch thứ 2 trở đi) ===
+            if train_idx == 1:
+                if master_process: logger.info(">>> Giai đoạn 2: Mở khóa toàn bộ, dùng LR nhỏ...")
+                # Mở khóa toàn bộ
+                for param in model.parameters():
+                    param.requires_grad = True
+                for param in resnet_img.parameters():
+                    param.requires_grad = True
+                for param in resnet_roi.parameters():
+                    param.requires_grad = True
+                    
+                # Set LR nhỏ chuẩn (ví dụ 2e-5)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = 2e-5
+                if master_process: logger.info(f"    LR set to 2e-5 for full model fine-tuning")
+            
             model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
 
