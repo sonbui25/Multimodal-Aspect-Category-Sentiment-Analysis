@@ -450,7 +450,7 @@ def main():
             if train_idx == 1:
                 if master_process: logger.info(">>> Giai đoạn 2: Mở khóa toàn bộ, dùng LR nhỏ...")
                 # Mở khóa toàn bộ
-                for param in model.parameters():
+                for param in model.encoder.parameters():
                     param.requires_grad = True
                 for param in resnet_img.parameters():
                     param.requires_grad = True
