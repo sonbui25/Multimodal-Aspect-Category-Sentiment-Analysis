@@ -13,12 +13,12 @@ from torch.utils.data import Dataset, DataLoader
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- DATASET ĐỂ LOAD ẢNH HÀNG LOẠT ---
 class ImageDataset(Dataset):
     def __init__(self, image_dir, transform):
         self.image_dir = image_dir
         self.transform = transform
         valid_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+        # Lọc file ảnh hợp lệ
         self.image_files = [f for f in os.listdir(image_dir) if os.path.splitext(f)[1].lower() in valid_extensions]
 
     def __len__(self):
@@ -32,7 +32,6 @@ class ImageDataset(Dataset):
             image = self.transform(image)
             return image, file_name
         except Exception as e:
-            # Trả về dummy tensor nếu lỗi
             return torch.zeros(3, 299, 299), "error"
 
 def create_caption_and_mask(start_token, max_length, batch_size):
@@ -46,8 +45,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image_dir", default='../vimacsa/image', type=str)
     parser.add_argument("--output_file", default='visual_captions_catr_vi.json', type=str)
-    parser.add_argument("--batch_size", default=32, type=int, help="Tăng batch size để chạy nhanh hơn")
-    parser.add_argument("--max_len", default=50, type=int, help="Giảm max_len xuống 50 là đủ cho caption")
+    parser.add_argument("--batch_size", default=32, type=int)
+    # [FIX] Mặc định max_len phải là 128 theo kiến trúc CATR
+    parser.add_argument("--max_len", default=128, type=int) 
     parser.add_argument("--device", default='cuda' if torch.cuda.is_available() else 'cpu', type=str)
     args = parser.parse_args()
 
@@ -79,7 +79,6 @@ def main():
     trans_model.eval()
 
     def translate_batch(texts):
-        # Lọc bỏ các caption rỗng hoặc lỗi trước khi dịch
         valid_indices = [i for i, t in enumerate(texts) if t]
         if not valid_indices: return texts
         
@@ -94,33 +93,43 @@ def main():
             results[idx] = decoded[i].replace("vi: ", "").strip()
         return results
 
-    # 3. PREPARE DATALOADER
+    # 3. DATALOADER
     dataset = ImageDataset(args.image_dir, catr_transform)
+    # num_workers=2 để load ảnh song song
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     captions_dict = {}
 
-    # 4. GENERATION LOOP (BATCHED)
+    # 4. GENERATION LOOP
     logger.info("Starting Batch Generation...")
     
     for images, filenames in tqdm(dataloader, desc="Generating"):
         current_batch_size = images.size(0)
         images = images.to(device)
         
-        # Init Caption & Mask cho cả batch
         caption, cap_mask = create_caption_and_mask(start_token, args.max_len, current_batch_size)
         caption = caption.to(device)
         cap_mask = cap_mask.to(device)
+        
+        # Theo dõi trạng thái hoàn thành của từng ảnh trong batch
+        finished = torch.zeros(current_batch_size, dtype=torch.bool).to(device)
 
         with torch.no_grad():
-            # Autoregressive Loop
             for step in range(args.max_len - 1):
                 predictions = catr_model(images, caption, cap_mask)
                 predictions = predictions[:, step, :]
                 predicted_ids = torch.argmax(predictions, axis=-1)
                 
+                # Gán token dự đoán
                 caption[:, step+1] = predicted_ids
                 cap_mask[:, step+1] = False
+                
+                # Cập nhật trạng thái 'finished' nếu gặp token SEP
+                finished |= (predicted_ids == end_token)
+                
+                # [FIX] Dừng sớm nếu TOÀN BỘ batch đã xong
+                if finished.all():
+                    break
 
         # Decode Batch
         en_captions = []
@@ -131,10 +140,11 @@ def main():
                 
             output_ids = caption[i].tolist()
             try:
+                # Cắt chuỗi tại SEP token đầu tiên
                 end_idx = output_ids.index(end_token)
                 output_ids = output_ids[1:end_idx]
             except ValueError:
-                output_ids = output_ids[1:]
+                output_ids = output_ids[1:] # Lấy hết nếu ko thấy SEP
             
             cap_text = tokenizer.decode(output_ids, skip_special_tokens=True)
             en_captions.append(cap_text)
@@ -142,15 +152,18 @@ def main():
         # Translate Batch
         vi_captions = translate_batch(en_captions)
 
-        # Save to Dict
         for fname, vicap in zip(filenames, vi_captions):
             if fname != "error":
                 captions_dict[fname] = vicap
 
     # 5. SAVE
-    with open(args.output_file, 'w', encoding='utf-8') as f:
+    output_path = args.output_file
+    if os.path.dirname(output_path):
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+    with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(captions_dict, f, indent=4, ensure_ascii=False)
-    logger.info(f"Done! Saved {len(captions_dict)} captions.")
+    logger.info(f"Done! Saved {len(captions_dict)} captions to {output_path}")
 
 if __name__ == "__main__":
     main()
