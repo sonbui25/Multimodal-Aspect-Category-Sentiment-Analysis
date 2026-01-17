@@ -433,8 +433,8 @@ def main():
             # === GIAI ĐOẠN 1: FREEZE (Trong epoch đầu tiên) ===
             if train_idx == 0:
                 if master_process: logger.info(">>> Giai đoạn 1: Đóng băng Encoder để train Classifier Head...")
-                # Đóng băng BERT và ResNet
-                for param in model.bert.parameters():
+                # Đóng băng Encoder (bao gồm BERT bên trong)
+                for param in model.encoder.parameters():
                     param.requires_grad = False
                 for param in resnet_img.parameters():
                     param.requires_grad = False
