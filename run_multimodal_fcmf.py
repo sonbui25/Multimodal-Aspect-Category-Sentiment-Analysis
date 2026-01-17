@@ -457,10 +457,10 @@ def main():
                 for param in resnet_roi.parameters():
                     param.requires_grad = True
                     
-                # Set LR nhỏ chuẩn (ví dụ 2e-5)
+                # Set LR nhỏ chuẩn (ví dụ args.encoder_learning_rate)
                 for param_group in optimizer.param_groups:
-                    param_group['lr'] = 2e-5
-                if master_process: logger.info(f"    LR set to 2e-5 for full model fine-tuning")
+                    param_group['lr'] = args.encoder_learning_rate
+                if master_process: logger.info(f"    LR set to args.encoder_learning_rate for full model fine-tuning")
             
             model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
