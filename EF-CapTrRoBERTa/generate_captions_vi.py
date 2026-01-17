@@ -125,7 +125,7 @@ def main():
     dataset = TwitterImagesDataset(args.image_dir, start_token, config.max_position_embeddings)
     
     # [QUAN TRỌNG] Bỏ collate_fn tùy chỉnh, dùng mặc định để stack batch
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=18)
 
     img_to_caption = {}
 
