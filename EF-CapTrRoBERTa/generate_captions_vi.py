@@ -155,7 +155,7 @@ def main():
         for fname, vicap in zip(filenames, vi_captions):
             if fname != "error":
                 captions_dict[fname] = vicap
-
+                print(f"{fname}: {vicap}")
     # 5. SAVE
     output_path = args.output_file
     if os.path.dirname(output_path):
