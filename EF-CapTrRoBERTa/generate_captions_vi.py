@@ -1,174 +1,168 @@
 import torch
-import os
-import json
-from tqdm import tqdm
-from PIL import Image
-from transformers import BertTokenizer, AutoTokenizer, AutoModelForSeq2SeqLM
-import torchvision.transforms as T
-import argparse
-import logging
 from torch.utils.data import Dataset, DataLoader
+import json
+from transformers import BertTokenizer
+from PIL import Image
+import argparse
+import os
+from tqdm import tqdm
+import torchvision.transforms.functional as F
+import torchvision.transforms as T
+import numpy as np
+import logging
 
 # --- CẤU HÌNH LOGGER ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ImageDataset(Dataset):
-    def __init__(self, image_dir, transform):
-        self.image_dir = image_dir
-        self.transform = transform
-        valid_extensions = {".jpg", ".jpeg", ".png", ".webp"}
-        # Lọc file ảnh hợp lệ
-        self.image_files = [f for f in os.listdir(image_dir) if os.path.splitext(f)[1].lower() in valid_extensions]
+# --- 1. CÁC CLASS HỖ TRỢ (GIỐNG HỆT CODE GỐC) ---
 
-    def __len__(self):
-        return len(self.image_files)
+class SquarePad:
+    def __call__(self, image):
+        w, h = image.size
+        max_wh = np.max([w, h])
+        hp = int((max_wh - w) / 2)
+        vp = int((max_wh - h) / 2)
+        padding = (hp, vp, hp, vp)
+        return F.pad(image, padding, 0, 'constant')
 
-    def __getitem__(self, idx):
-        file_name = self.image_files[idx]
-        img_path = os.path.join(self.image_dir, file_name)
-        try:
-            image = Image.open(img_path).convert('RGB')
-            image = self.transform(image)
-            return image, file_name
-        except Exception as e:
-            return torch.zeros(3, 299, 299), "error"
+class Config:
+    def __init__(self):
+        self.max_position_embeddings = 128
+        self.hidden_dim = 768
 
-def create_caption_and_mask(start_token, max_length, batch_size):
-    caption_template = torch.zeros((batch_size, max_length), dtype=torch.long)
-    mask_template = torch.ones((batch_size, max_length), dtype=torch.bool)
-    caption_template[:, 0] = start_token
-    mask_template[:, 0] = False
-    return caption_template, mask_template
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--image_dir", default='../vimacsa/image', type=str)
-    parser.add_argument("--output_file", default='visual_captions_catr_vi.json', type=str)
-    parser.add_argument("--batch_size", default=32, type=int)
-    # [FIX] Mặc định max_len phải là 128 theo kiến trúc CATR
-    parser.add_argument("--max_len", default=128, type=int) 
-    parser.add_argument("--device", default='cuda' if torch.cuda.is_available() else 'cpu', type=str)
-    args = parser.parse_args()
-
-    device = args.device
-    logger.info(f"Running on {device} with Batch Size {args.batch_size}...")
-
-    # 1. LOAD MODEL CATR
-    logger.info("Loading CATR model (v3)...")
-    catr_model = torch.hub.load('saahiluppal/catr', 'v3', pretrained=True)
-    catr_model.to(device)
-    catr_model.eval()
-
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    start_token = tokenizer.convert_tokens_to_ids(tokenizer.cls_token)
-    end_token = tokenizer.convert_tokens_to_ids(tokenizer.sep_token)
-
-    catr_transform = T.Compose([
-        T.Resize(299),
-        T.CenterCrop(299),
+# Transform chuẩn của CATR (Thay thế cho coco.val_transform)
+def get_transform():
+    return T.Compose([
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    # # 2. LOAD TRANSLATOR
-    # logger.info("Loading Translator (EnViT5)...")
-    # trans_model_name = "VietAI/envit5-translation"
-    # trans_tokenizer = AutoTokenizer.from_pretrained(trans_model_name)
-    # trans_model = AutoModelForSeq2SeqLM.from_pretrained(trans_model_name).to(device)
-    # trans_model.eval()
+def create_caption_and_mask(start_token, max_length):
+    caption_template = torch.zeros((1, max_length), dtype=torch.long)
+    mask_template = torch.ones((1, max_length), dtype=torch.bool)
 
-    # def translate_batch(texts):
-    #     valid_indices = [i for i, t in enumerate(texts) if t]
-    #     if not valid_indices: return texts
-        
-    #     inputs = [f"en: {texts[i]}" for i in valid_indices]
-    #     encoded = trans_tokenizer(inputs, return_tensors="pt", padding=True, truncation=True, max_length=128).to(device)
-    #     with torch.no_grad():
-    #         generated_ids = trans_model.generate(**encoded, max_length=128)
-    #     decoded = trans_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        
-    #     results = list(texts)
-    #     for i, idx in enumerate(valid_indices):
-    #         results[idx] = decoded[i].replace("vi: ", "").strip()
-    #     return results
+    caption_template[:, 0] = start_token
+    mask_template[:, 0] = False
 
-    # 3. DATALOADER
-    dataset = ImageDataset(args.image_dir, catr_transform)
-    # num_workers để load ảnh song song
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=18)
+    return caption_template, mask_template
 
-    captions_dict = {}
+# --- 2. HÀM EVALUATE (GIỮ NGUYÊN LOGIC AUTOREGRESSIVE) ---
+@torch.no_grad()
+def evaluate(model, image, caption, cap_mask, max_pos_emb):
+    model.eval()
+    # Vòng lặp sinh từ (Đây là cách code gốc hoạt động)
+    for i in range(max_pos_emb - 1):
+        predictions = model(image, caption, cap_mask)
+        predictions = predictions[:, i, :]
+        predicted_id = torch.argmax(predictions, axis=-1)
 
-    # 4. GENERATION LOOP
-    logger.info("Starting Batch Generation...")
-    
-    for images, filenames in tqdm(dataloader, desc="Generating"):
-        current_batch_size = images.size(0)
-        images = images.to(device)
-        
-        caption, cap_mask = create_caption_and_mask(start_token, args.max_len, current_batch_size)
-        caption = caption.to(device)
-        cap_mask = cap_mask.to(device)
-        
-        # Theo dõi trạng thái hoàn thành của từng ảnh trong batch
-        finished = torch.zeros(current_batch_size, dtype=torch.bool).to(device)
+        if predicted_id[0] == 102: # Token SEP (Kết thúc)
+            return caption
 
-        with torch.no_grad():
-            for step in range(args.max_len - 1):
-                predictions = catr_model(images, caption, cap_mask)
-                predictions = predictions[:, step, :]
-                predicted_ids = torch.argmax(predictions, axis=-1)
-                
-                # Gán token dự đoán
-                caption[:, step+1] = predicted_ids
-                cap_mask[:, step+1] = False
-                
-                # Cập nhật trạng thái 'finished' nếu gặp token SEP
-                finished |= (predicted_ids == end_token)
-                
-                # [FIX] Dừng sớm nếu TOÀN BỘ batch đã xong
-                if finished.all():
-                    break
+        caption[:, i+1] = predicted_id[0]
+        cap_mask[:, i+1] = False
 
-        # Decode Batch
-        en_captions = []
-        for i in range(current_batch_size):
-            if filenames[i] == "error":
-                en_captions.append("")
-                continue
-                
-            output_ids = caption[i].tolist()
-            try:
-                # Cắt chuỗi tại SEP token đầu tiên
-                end_idx = output_ids.index(end_token)
-                output_ids = output_ids[1:end_idx]
-            except ValueError:
-                output_ids = output_ids[1:] # Lấy hết nếu ko thấy SEP
+    return caption
+
+# --- 3. DATASET ---
+class TwitterImagesDataset(Dataset):
+    def __init__(self, image_dir, start_token, max_position_embeddings):
+        valid_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+        self.image_paths = [os.path.join(image_dir, f) for f in os.listdir(image_dir) 
+                           if os.path.splitext(f)[1].lower() in valid_extensions]
+        self.start_token = start_token
+        self.max_position_embeddings = max_position_embeddings
+        self.sqpad = SquarePad()
+        self.transform = get_transform()
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, item):
+        img_path = self.image_paths[item]
+        try:
+            image = Image.open(img_path).convert('RGB')
             
-            cap_text = tokenizer.decode(output_ids, skip_special_tokens=True)
-            en_captions.append(cap_text)
+            # Quy trình xử lý ảnh gốc: SquarePad -> Resize 299 -> Transform
+            image = self.sqpad(image)
+            image = F.resize(image, 299)
+            image = self.transform(image)
+            
+            # CATR nhận input shape [1, 3, 299, 299] (thêm batch dimension ảo nếu chạy đơn lẻ)
+            # Nhưng DataLoader sẽ tự stack, nên ở đây trả về [3, 299, 299]
+            
+            caption, cap_mask = create_caption_and_mask(
+                self.start_token, self.max_position_embeddings)
 
-        # Chi lay caption tieng Anh
-        for fname, encap in zip(filenames, en_captions):
-            if fname != "error":
-                captions_dict[fname] = encap
-                print(f"{fname}: {encap}")
-        # # Translate Batch
-        # vi_captions = translate_batch(en_captions)
+            return {
+                "image": image,
+                "caption": caption,
+                "cap_mask": cap_mask,
+                "file_name": os.path.basename(img_path)
+            }
+        except Exception as e:
+            return None
 
-        # for fname, vicap in zip(filenames, vi_captions):
-        #     if fname != "error":
-        #         captions_dict[fname] = vicap
-        #         print(f"{fname}: {vicap}")
-    # 5. SAVE
-    output_path = args.output_file
-    if os.path.dirname(output_path):
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(captions_dict, f, indent=4, ensure_ascii=False)
-    logger.info(f"Done! Saved {len(captions_dict)} captions to {output_path}")
+def main():
+    parser = argparse.ArgumentParser(description='Image Captioning Original Style')
+    parser.add_argument('--image_dir', type=str, default='../vimacsa/image', help='path to images')
+    parser.add_argument('--output_file', type=str, default='visual_captions_catr_original_en.json')
+    parser.add_argument('--batch_size', type=int, default=1, help="Code gốc chạy từng ảnh, nhưng ta có thể batch để nhanh hơn nếu muốn. Để 1 cho giống hệt.")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Running on {device}...")
+
+    # Load Model (v3 như file gốc)
+    logger.info("Loading CATR v3...")
+    model = torch.hub.load('saahiluppal/catr', 'v3', pretrained=True)
+    model.to(device)
+    model.eval()
+
+    # Tokenizer & Config
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    config = Config()
+    start_token = tokenizer.convert_tokens_to_ids(tokenizer.cls_token) # dùng cls_token thay vì _cls_token để tránh lỗi version
+
+    # Dataset & Loader
+    dataset = TwitterImagesDataset(args.image_dir, start_token, config.max_position_embeddings)
+    # Code gốc chạy loop thuần túy, ở đây dùng DataLoader để quản lý file tốt hơn
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2, collate_fn=lambda x: x[0] if x[0] is not None else None)
+
+    img_to_caption = {}
+    errors = 0
+
+    logger.info("Starting Generation (Original Autoregressive Loop)...")
+    for batch in tqdm(dataloader):
+        if batch is None:
+            errors += 1
+            continue
+
+        image = batch['image'].unsqueeze(0).to(device) # Thêm batch dim [1, 3, 299, 299]
+        caption = batch['caption'].to(device)
+        cap_mask = batch['cap_mask'].to(device)
+        file_name = batch['file_name']
+
+        try:
+            # Gọi hàm evaluate y hệt file gốc
+            output = evaluate(model, image, caption, cap_mask, config.max_position_embeddings)
+            
+            # Decode
+            result = tokenizer.decode(output[0].tolist(), skip_special_tokens=True)
+            result = result.capitalize()
+            
+            img_to_caption[file_name] = result
+            print(f"{file_name}: {result}")
+        except Exception as e:
+            errors += 1
+            # print(f"Error processing {file_name}: {e}")
+
+    # Save
+    with open(args.output_file, "w", encoding='utf-8') as f:
+        json.dump(img_to_caption, f, indent=4)
+    
+    logger.info(f"Done! Saved {len(img_to_caption)} captions. Errors: {errors}")
 
 if __name__ == "__main__":
     main()
