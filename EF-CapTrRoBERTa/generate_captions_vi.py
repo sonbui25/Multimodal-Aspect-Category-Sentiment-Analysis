@@ -95,8 +95,8 @@ def main():
 
     # 3. DATALOADER
     dataset = ImageDataset(args.image_dir, catr_transform)
-    # num_workers=2 để load ảnh song song
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    # num_workers để load ảnh song song
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=10)
 
     captions_dict = {}
 
