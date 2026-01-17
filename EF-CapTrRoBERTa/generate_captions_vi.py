@@ -128,7 +128,7 @@ def main():
     # Dataset & Loader
     dataset = TwitterImagesDataset(args.image_dir, start_token, config.max_position_embeddings)
     # Code gốc chạy loop thuần túy, ở đây dùng DataLoader để quản lý file tốt hơn
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2, collate_fn=lambda x: x[0] if x[0] is not None else None)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=18, collate_fn=lambda x: x[0] if x[0] is not None else None)
 
     img_to_caption = {}
     errors = 0
