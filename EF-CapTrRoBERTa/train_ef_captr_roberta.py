@@ -65,7 +65,7 @@ class EFCapDataset(Dataset):
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
         text = row['comment']
-        img_paths = row['image']
+        img_paths = row['list_img']
         
         # --- Lấy Caption (Translation) ---
         captions = []
@@ -80,7 +80,7 @@ class EFCapDataset(Dataset):
         else: caption_str = ". ".join(captions)
 
         # --- Xử lý Label ---
-        text_img_label = row['label']
+        text_img_label = row['text_img_label']
         existing_aspects = {}
         for item in text_img_label:
             asp, pol = item.split("#")
