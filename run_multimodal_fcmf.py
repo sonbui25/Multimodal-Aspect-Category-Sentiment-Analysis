@@ -267,7 +267,7 @@ def main():
     optimizer_grouped_parameters = [
         {
             'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
-            'weight_decay': 0.001,
+            'weight_decay': 0.01,
             'lr': args.encoder_learning_rate 
         },
         {
@@ -278,7 +278,7 @@ def main():
         # Head Group: Higher LR
         {
             'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)], # For weights
-            'weight_decay': 0.001,
+            'weight_decay': 0.01,
             'lr': args.classifier_head_learning_rate 
         },
         {
@@ -429,44 +429,7 @@ def main():
         for train_idx in range(start_epoch, int(args.num_train_epochs)):
             if args.ddp: train_sampler.set_epoch(train_idx)
             if master_process: logger.info(f"********** Epoch: {train_idx} **********")
-            
-            # === GIAI ĐOẠN 1: FREEZE (Trong epoch đầu tiên) ===
-            if train_idx == 0:
-                if master_process: logger.info(">>> Giai đoạn 1: Đóng băng Encoder để train Classifier Head...")
-                # Đóng băng Encoder (bao gồm BERT bên trong)
-                for param in model.encoder.parameters():
-                    param.requires_grad = False
-                for param in resnet_img.parameters():
-                    param.requires_grad = False
-                for param in resnet_roi.parameters():
-                    param.requires_grad = False
-                    
-                # Set LR cao cho Head (ví dụ args.classifier_head_learning_rate)
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = args.classifier_head_learning_rate 
-                if master_process: logger.info(f"    LR set to args.classifier_head_learning_rate for Classifier Head training")
-
-            # === GIAI ĐOẠN 2: UNFREEZE (Từ epoch thứ 2 trở đi) ===
-            elif train_idx == 1:
-                if master_process: logger.info(">>> [EPOCH 1+] UNFREEZING ALL & SYNCING LR...")
-                
-                # 1. Unfreeze (Giữ nguyên)
-                for param in model.encoder.parameters(): param.requires_grad = True
-                if args.fine_tune_cnn:
-                    for param in resnet_img.parameters(): param.requires_grad = True
-                    for param in resnet_roi.parameters(): param.requires_grad = True
-                
-                # 2. SET LR MỚI CHO OPTIMIZER (Giữ nguyên)
-                target_lr = args.encoder_learning_rate
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = target_lr
-
-                # 3. [QUAN TRỌNG] CẬP NHẬT LUÔN BASE_LRS CỦA SCHEDULER
-                for i in range(len(scheduler.base_lrs)):
-                    scheduler.base_lrs[i] = target_lr
-                
-                if master_process: logger.info(f"--> Force synced all Scheduler Base LRs to {target_lr}")
-            
+        
             model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
 
