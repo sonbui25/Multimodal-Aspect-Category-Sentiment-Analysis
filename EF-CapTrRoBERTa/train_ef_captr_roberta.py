@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
-from torch.cuda.amp import autocast, GradScaler
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 from text_preprocess import TextNormalize, convert_unicode
 from underthesea import text_normalize # Nếu cần dùng hàm text_normalize của underthesea như fcmf
@@ -103,7 +102,7 @@ class EFCapDataset(Dataset):
                 text_b,
                 max_length=self.max_len,
                 padding='max_length',
-                truncation='only_first',
+                truncation=True,
                 return_tensors='pt'
             )
 
@@ -225,7 +224,10 @@ def main():
         
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(num_train_steps * 0.1), num_training_steps=num_train_steps)
     criterion = nn.CrossEntropyLoss()
-    scaler = GradScaler() if args.fp16 else None
+    if args.fp16:
+        scaler = torch.amp.GradScaler('cuda')
+    else:
+        scaler = None
 
     start_epoch = 0; max_f1 = 0.0
     
@@ -255,7 +257,7 @@ def main():
                     # Unpack (text ở cuối)
                     input_ids, attention_mask, labels, _ = [b.to(device) if torch.is_tensor(b) else b for b in batch]
                     
-                    with autocast(enabled=args.fp16):
+                    with torch.amp.autocast('cuda' if args.fp16 else 'cpu'):
                         loss = 0
                         for i in range(6): # 6 aspects
                             logits = model(input_ids[:,i,:], attention_mask[:,i,:])
