@@ -267,7 +267,7 @@ def main():
     optimizer_grouped_parameters = [
         {
             'params': [p for n, p in encoder_params if not any(nd in n for nd in no_decay)],
-            'weight_decay': 0.00001,
+            'weight_decay': 0.001,
             'lr': args.encoder_learning_rate 
         },
         {
@@ -278,7 +278,7 @@ def main():
         # Head Group: Higher LR
         {
             'params': [p for n, p in head_params if not any(nd in n for nd in no_decay)], # For weights
-            'weight_decay': 0.00001,
+            'weight_decay': 0.001,
             'lr': args.classifier_head_learning_rate 
         },
         {
