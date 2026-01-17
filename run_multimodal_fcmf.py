@@ -447,20 +447,25 @@ def main():
                 if master_process: logger.info(f"    LR set to args.classifier_head_learning_rate for Classifier Head training")
 
             # === GIAI ĐOẠN 2: UNFREEZE (Từ epoch thứ 2 trở đi) ===
-            if train_idx == 1:
-                if master_process: logger.info(">>> Giai đoạn 2: Mở khóa toàn bộ, dùng LR nhỏ...")
-                # Mở khóa toàn bộ
-                for param in model.encoder.parameters():
-                    param.requires_grad = True
-                for param in resnet_img.parameters():
-                    param.requires_grad = True
-                for param in resnet_roi.parameters():
-                    param.requires_grad = True
-                    
-                # Set LR nhỏ chuẩn (ví dụ args.encoder_learning_rate)
+            elif train_idx == 1:
+                if master_process: logger.info(">>> [EPOCH 1+] UNFREEZING ALL & SYNCING LR...")
+                
+                # 1. Unfreeze (Giữ nguyên)
+                for param in model.encoder.parameters(): param.requires_grad = True
+                if args.fine_tune_cnn:
+                    for param in resnet_img.parameters(): param.requires_grad = True
+                    for param in resnet_roi.parameters(): param.requires_grad = True
+                
+                # 2. SET LR MỚI CHO OPTIMIZER (Giữ nguyên)
+                target_lr = args.encoder_learning_rate
                 for param_group in optimizer.param_groups:
-                    param_group['lr'] = args.encoder_learning_rate
-                if master_process: logger.info(f"    LR set to args.encoder_learning_rate for full model fine-tuning")
+                    param_group['lr'] = target_lr
+
+                # 3. [QUAN TRỌNG] CẬP NHẬT LUÔN BASE_LRS CỦA SCHEDULER
+                for i in range(len(scheduler.base_lrs)):
+                    scheduler.base_lrs[i] = target_lr
+                
+                if master_process: logger.info(f"--> Force synced all Scheduler Base LRs to {target_lr}")
             
             model.train(); resnet_img.train(); resnet_roi.train()
             optimizer.zero_grad()
