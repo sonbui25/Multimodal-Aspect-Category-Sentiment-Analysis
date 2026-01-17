@@ -22,7 +22,7 @@ def main():
     model_cap = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
     model_cap.eval()
 
-    # 2. Load Model Dịch (VietAI/envit5-translation) - TỐT HƠN HELSINKI
+    # 2. Load Model Dịch (VietAI/envit5-translation)
     print("Loading Translation model (VietAI EnViT5)...")
     trans_model_name = "VietAI/envit5-translation"
     tokenizer_trans = AutoTokenizer.from_pretrained(trans_model_name)
@@ -81,7 +81,7 @@ def main():
     with open(args.output_file, 'w', encoding='utf-8') as f:
         json.dump(captions_dict, f, indent=4, ensure_ascii=False)
     
-    print(f"Hoàn tất! Caption sạch (không nốt nhạc) đã lưu tại {args.output_file}")
+    print(f"Hoàn tất! Caption đã lưu tại {args.output_file}")
 
 if __name__ == "__main__":
     main()
