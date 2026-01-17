@@ -11,12 +11,10 @@ import torchvision.transforms as T
 import numpy as np
 import logging
 
-# --- CẤU HÌNH LOGGER ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 1. CÁC CLASS HỖ TRỢ (GIỐNG HỆT CODE GỐC) ---
-
+# --- 1. UTILS (GIỮ NGUYÊN) ---
 class SquarePad:
     def __call__(self, image):
         w, h = image.size
@@ -31,7 +29,6 @@ class Config:
         self.max_position_embeddings = 128
         self.hidden_dim = 768
 
-# Transform chuẩn của CATR (Thay thế cho coco.val_transform)
 def get_transform():
     return T.Compose([
         T.ToTensor(),
@@ -39,28 +36,25 @@ def get_transform():
     ])
 
 def create_caption_and_mask(start_token, max_length):
+    # Hàm này tạo caption cho 1 ảnh, ta sẽ dùng repeat trong dataset hoặc tạo batch trong loop
     caption_template = torch.zeros((1, max_length), dtype=torch.long)
     mask_template = torch.ones((1, max_length), dtype=torch.bool)
-
     caption_template[:, 0] = start_token
     mask_template[:, 0] = False
-
     return caption_template, mask_template
 
-# --- 2. HÀM EVALUATE (GIỮ NGUYÊN LOGIC AUTOREGRESSIVE) ---
+# --- 2. EVALUATE (Hỗ trợ Batch) ---
 @torch.no_grad()
 def evaluate(model, image, caption, cap_mask, max_pos_emb):
     model.eval()
-    # Vòng lặp sinh từ (Đây là cách code gốc hoạt động)
+    # Vòng lặp Autoregressive (Sinh từng từ)
     for i in range(max_pos_emb - 1):
         predictions = model(image, caption, cap_mask)
         predictions = predictions[:, i, :]
         predicted_id = torch.argmax(predictions, axis=-1)
 
-        if predicted_id[0] == 102: # Token SEP (Kết thúc)
-            return caption
-
-        caption[:, i+1] = predicted_id[0]
+        # Gán token dự đoán vào bước tiếp theo
+        caption[:, i+1] = predicted_id
         cap_mask[:, i+1] = False
 
     return caption
@@ -83,86 +77,89 @@ class TwitterImagesDataset(Dataset):
         img_path = self.image_paths[item]
         try:
             image = Image.open(img_path).convert('RGB')
-            
-            # Quy trình xử lý ảnh gốc: SquarePad -> Resize 299 -> Transform
             image = self.sqpad(image)
             image = F.resize(image, 299)
             image = self.transform(image)
             
-            # CATR nhận input shape [1, 3, 299, 299] (thêm batch dimension ảo nếu chạy đơn lẻ)
-            # Nhưng DataLoader sẽ tự stack, nên ở đây trả về [3, 299, 299]
-            
+            # Tạo template caption [1, 128] -> squeeze thành [128] để DataLoader tự stack
             caption, cap_mask = create_caption_and_mask(
                 self.start_token, self.max_position_embeddings)
-
+            
             return {
                 "image": image,
-                "caption": caption,
-                "cap_mask": cap_mask,
-                "file_name": os.path.basename(img_path)
+                "caption": caption.squeeze(0), 
+                "cap_mask": cap_mask.squeeze(0),
+                "file_name": os.path.basename(img_path),
+                "valid": True
             }
         except Exception as e:
-            return None
+            # Trả về dummy data nếu lỗi (để không làm crash dataloader)
+            return {
+                "image": torch.zeros(3, 299, 299),
+                "caption": torch.zeros(128, dtype=torch.long),
+                "cap_mask": torch.ones(128, dtype=torch.bool),
+                "file_name": "error",
+                "valid": False
+            }
 
 def main():
-    parser = argparse.ArgumentParser(description='Image Captioning Original Style')
-    parser.add_argument('--image_dir', type=str, default='../vimacsa/image', help='path to images')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image_dir', type=str, default='../vimacsa/image')
     parser.add_argument('--output_file', type=str, default='visual_captions_catr_original_en.json')
-    parser.add_argument('--batch_size', type=int, default=1, help="Code gốc chạy từng ảnh, nhưng ta có thể batch để nhanh hơn nếu muốn. Để 1 cho giống hệt.")
+    parser.add_argument('--batch_size', type=int, default=32) # Batch size lớn để chạy nhanh
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Running on {device}...")
+    logger.info(f"Running on {device} with Batch Size {args.batch_size}...")
 
-    # Load Model (v3 như file gốc)
-    logger.info("Loading CATR v3...")
+    # Load Model
     model = torch.hub.load('saahiluppal/catr', 'v3', pretrained=True)
     model.to(device)
     model.eval()
 
-    # Tokenizer & Config
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     config = Config()
-    start_token = tokenizer.convert_tokens_to_ids(tokenizer.cls_token) # dùng cls_token thay vì _cls_token để tránh lỗi version
+    start_token = tokenizer.convert_tokens_to_ids(tokenizer.cls_token)
 
     # Dataset & Loader
     dataset = TwitterImagesDataset(args.image_dir, start_token, config.max_position_embeddings)
-    # Code gốc chạy loop thuần túy, ở đây dùng DataLoader để quản lý file tốt hơn
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=18, collate_fn=lambda x: x[0] if x[0] is not None else None)
+    
+    # [QUAN TRỌNG] Bỏ collate_fn tùy chỉnh, dùng mặc định để stack batch
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     img_to_caption = {}
-    errors = 0
 
-    logger.info("Starting Generation (Original Autoregressive Loop)...")
-    for batch in tqdm(dataloader):
-        if batch is None:
-            errors += 1
-            continue
+    for batch in tqdm(dataloader, desc="Generating"):
+        # Lọc bỏ các mẫu lỗi (nếu có)
+        valid_mask = batch['valid']
+        if not valid_mask.any(): continue
+        
+        images = batch['image'][valid_mask].to(device)
+        captions = batch['caption'][valid_mask].to(device)
+        cap_masks = batch['cap_mask'][valid_mask].to(device)
+        filenames = np.array(batch['file_name'])[valid_mask.cpu().numpy()]
 
-        image = batch['image'].unsqueeze(0).to(device) # Thêm batch dim [1, 3, 299, 299]
-        caption = batch['caption'].to(device)
-        cap_mask = batch['cap_mask'].to(device)
-        file_name = batch['file_name']
+        # Chạy model (Batch processing)
+        # Hàm evaluate này vẫn giữ logic Autoregressive gốc nhưng chạy song song nhiều ảnh
+        outputs = evaluate(model, images, captions, cap_masks, config.max_position_embeddings)
 
-        try:
-            # Gọi hàm evaluate y hệt file gốc
-            output = evaluate(model, image, caption, cap_mask, config.max_position_embeddings)
+        # Decode kết quả
+        for i, output_ids in enumerate(outputs):
+            # Tìm token SEP (102) để cắt chuỗi
+            out_list = output_ids.tolist()
+            if 102 in out_list:
+                end_idx = out_list.index(102)
+                out_list = out_list[:end_idx]
             
-            # Decode
-            result = tokenizer.decode(output[0].tolist(), skip_special_tokens=True)
+            result = tokenizer.decode(out_list, skip_special_tokens=True)
             result = result.capitalize()
-            
-            img_to_caption[file_name] = result
-            print(f"{file_name}: {result}")
-        except Exception as e:
-            errors += 1
-            # print(f"Error processing {file_name}: {e}")
+            img_to_caption[filenames[i]] = result
 
     # Save
     with open(args.output_file, "w", encoding='utf-8') as f:
         json.dump(img_to_caption, f, indent=4)
     
-    logger.info(f"Done! Saved {len(img_to_caption)} captions. Errors: {errors}")
+    logger.info(f"Done! Saved {len(img_to_caption)} captions.")
 
 if __name__ == "__main__":
     main()
