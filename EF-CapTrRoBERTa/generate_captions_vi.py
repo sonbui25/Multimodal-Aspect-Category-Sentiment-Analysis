@@ -170,7 +170,7 @@ def main():
             result = tokenizer.decode(out_list, skip_special_tokens=True)
             result = result.capitalize()
             img_to_caption[filenames[i]] = result
-
+            print(f"{filenames[i]}: {result}")
     with open(args.output_file, "w", encoding='utf-8') as f:
         json.dump(img_to_caption, f, indent=4)
     
