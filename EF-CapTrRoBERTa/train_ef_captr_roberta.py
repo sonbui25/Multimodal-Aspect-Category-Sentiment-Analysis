@@ -198,6 +198,8 @@ def main():
     cap_path = os.path.join(args.data_dir, args.caption_file)
     try:
         with open(cap_path, 'r', encoding='utf-8') as f: caption_dict = json.load(f)
+        # Preprocess captions giống comments
+        caption_dict = {k: normalizer.normalize(text_normalize(convert_unicode(v))) for k, v in caption_dict.items()}
     except:
         logger.warning(f"Caption file {cap_path} not found. Running without captions.")
         caption_dict = {}
