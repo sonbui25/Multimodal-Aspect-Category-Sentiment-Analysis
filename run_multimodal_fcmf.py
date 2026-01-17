@@ -441,10 +441,10 @@ def main():
                 for param in resnet_roi.parameters():
                     param.requires_grad = False
                     
-                # Set LR cao cho Head (ví dụ 1e-3)
+                # Set LR cao cho Head (ví dụ args.classifier_head_learning_rate)
                 for param_group in optimizer.param_groups:
-                    param_group['lr'] = 1e-3 
-                if master_process: logger.info(f"    LR set to 1e-3 for Classifier Head training")
+                    param_group['lr'] = args.classifier_head_learning_rate 
+                if master_process: logger.info(f"    LR set to args.classifier_head_learning_rate for Classifier Head training")
 
             # === GIAI ĐOẠN 2: UNFREEZE (Từ epoch thứ 2 trở đi) ===
             if train_idx == 1:
