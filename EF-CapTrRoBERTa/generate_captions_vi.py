@@ -33,17 +33,17 @@ def main():
     # 1. LOAD MODEL CATR (ORIGINAL PAPER MODEL)
     # ==============================================================================
     logger.info("Loading CATR model (v3) from torch.hub...")
-    # Load model CATR gốc từ repo của tác giả saahiluppal
     catr_model = torch.hub.load('saahiluppal/catr', 'v3', pretrained=True)
     catr_model.to(device)
     catr_model.eval()
 
-    # Tokenizer của CATR dùng BERT-base-uncased
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    start_token = tokenizer.convert_tokens_to_ids(tokenizer._cls_token)
-    end_token = tokenizer.convert_tokens_to_ids(tokenizer._sep_token)
+    
+    # [ĐÃ SỬA LỖI Ở ĐÂY]
+    # Thay tokenizer._cls_token thành tokenizer.cls_token
+    start_token = tokenizer.convert_tokens_to_ids(tokenizer.cls_token)
+    end_token = tokenizer.convert_tokens_to_ids(tokenizer.sep_token)
 
-    # Transform chuẩn của CATR (Resize 299x299, Normalize Inception)
     catr_transform = T.Compose([
         T.Resize(299),
         T.CenterCrop(299),
@@ -52,9 +52,8 @@ def main():
     ])
 
     # ==============================================================================
-    # 2. LOAD TRANSLATOR (EnViT5) - DỊCH SANG TIẾNG VIỆT
+    # 2. LOAD TRANSLATOR (EnViT5)
     # ==============================================================================
-    # Vẫn cần dịch vì dataset ViMACSA là tiếng Việt
     logger.info("Loading Translator (EnViT5)...")
     trans_model_name = "VietAI/envit5-translation"
     trans_tokenizer = AutoTokenizer.from_pretrained(trans_model_name)
@@ -62,7 +61,6 @@ def main():
     trans_model.eval()
 
     def translate_en_to_vi(texts):
-        # Batch translation
         inputs = [f"en: {t}" for t in texts]
         encoded = trans_tokenizer(inputs, return_tensors="pt", padding=True, truncation=True, max_length=128).to(device)
         with torch.no_grad():
@@ -74,15 +72,16 @@ def main():
     # 3. GENERATE LOOP
     # ==============================================================================
     valid_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+    # Kiểm tra đường dẫn tồn tại trước khi list
+    if not os.path.exists(args.image_dir):
+        logger.error(f"Image directory not found: {args.image_dir}")
+        return
+
     image_files = [f for f in os.listdir(args.image_dir) if os.path.splitext(f)[1].lower() in valid_extensions]
     logger.info(f"Found {len(image_files)} images.")
 
     captions_dict = {}
-    
-    # CATR xử lý từng ảnh (không support batch tốt như BLIP) nên ta loop thường
-    # Tuy nhiên EnViT5 support batch, ta có thể gom buffer để dịch sau
-    
-    caption_buffer = [] # Lưu (filename, en_caption)
+    caption_buffer = [] 
     buffer_size = 16 
 
     for i, file_name in enumerate(tqdm(image_files, desc="Generating (CATR)")):
@@ -91,7 +90,7 @@ def main():
             image = Image.open(img_path).convert('RGB')
             image_tensor = catr_transform(image).unsqueeze(0).to(device)
 
-            # --- CATR Inference (Greedy Decoding) ---
+            # --- CATR Inference ---
             caption, cap_mask = create_caption_and_mask(start_token, max_length=128)
             caption = caption.to(device)
             cap_mask = cap_mask.to(device)
@@ -108,19 +107,18 @@ def main():
                     caption[:, step+1] = predicted_id[0]
                     cap_mask[:, step+1] = False
 
-            # Decode token IDs thành câu
             output_ids = caption[0].tolist()
-            # Cắt bỏ phần padding và special tokens
             try:
+                # Tìm vị trí token kết thúc để cắt chuỗi
                 end_idx = output_ids.index(end_token)
-                output_ids = output_ids[1:end_idx] # Bỏ CLS và sau SEP
+                output_ids = output_ids[1:end_idx] 
             except ValueError:
-                output_ids = output_ids[1:] # Lấy hết nếu không thấy SEP
+                output_ids = output_ids[1:] 
             
             en_caption = tokenizer.decode(output_ids, skip_special_tokens=True)
             caption_buffer.append((file_name, en_caption))
 
-            # --- Dịch theo Batch (cho nhanh) ---
+            # --- Translate Batch ---
             if len(caption_buffer) >= buffer_size or i == len(image_files) - 1:
                 filenames, en_texts = zip(*caption_buffer)
                 vi_texts = translate_en_to_vi(en_texts)
@@ -128,15 +126,22 @@ def main():
                 for fname, vicap in zip(filenames, vi_texts):
                     captions_dict[fname] = vicap
                 
-                caption_buffer = [] # Reset buffer
+                caption_buffer = []
 
         except Exception as e:
-            logger.error(f"Error {file_name}: {e}")
+            logger.error(f"Error processing {file_name}: {e}")
 
     # ==============================================================================
     # 4. SAVE RESULT
     # ==============================================================================
-    output_path = args.output_file if os.path.exists(os.path.dirname(args.output_file)) else os.path.join(args.image_dir, args.output_file)
+    # Xử lý đường dẫn file output an toàn
+    if os.path.dirname(args.output_file):
+        output_path = args.output_file
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    else:
+        # Nếu chỉ đưa tên file, lưu vào thư mục làm việc hiện tại hoặc image_dir
+        output_path = args.output_file
+
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(captions_dict, f, indent=4, ensure_ascii=False)
     
