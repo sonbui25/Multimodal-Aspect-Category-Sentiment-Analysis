@@ -75,6 +75,7 @@ def main():
         # C. Lưu kết quả
         for file_name, vi_cap in zip(valid_batch_files, vi_captions):
             captions_dict[file_name] = vi_cap
+            print(f"{file_name}: {vi_cap}")
 
     # 5. Lưu file JSON
     with open(args.output_file, 'w', encoding='utf-8') as f:
