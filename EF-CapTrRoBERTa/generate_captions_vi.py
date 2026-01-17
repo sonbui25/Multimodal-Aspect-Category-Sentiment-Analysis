@@ -11,6 +11,10 @@ import torchvision.transforms as T
 import numpy as np
 import logging
 
+# Tắt cảnh báo FP16
+import warnings
+warnings.filterwarnings("ignore")
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -36,26 +40,33 @@ def get_transform():
     ])
 
 def create_caption_and_mask(start_token, max_length):
-    # Hàm này tạo caption cho 1 ảnh, ta sẽ dùng repeat trong dataset hoặc tạo batch trong loop
     caption_template = torch.zeros((1, max_length), dtype=torch.long)
     mask_template = torch.ones((1, max_length), dtype=torch.bool)
     caption_template[:, 0] = start_token
     mask_template[:, 0] = False
     return caption_template, mask_template
 
-# --- 2. EVALUATE (Hỗ trợ Batch) ---
+# --- 2. EVALUATE (ĐÃ TỐI ƯU EARLY STOPPING) ---
 @torch.no_grad()
 def evaluate(model, image, caption, cap_mask, max_pos_emb):
     model.eval()
-    # Vòng lặp Autoregressive (Sinh từng từ)
+    
+    batch_size = image.size(0)
+    finished = torch.zeros(batch_size, dtype=torch.bool).to(image.device)
+    sep_token_id = 102 
+
     for i in range(max_pos_emb - 1):
         predictions = model(image, caption, cap_mask)
         predictions = predictions[:, i, :]
         predicted_id = torch.argmax(predictions, axis=-1)
 
-        # Gán token dự đoán vào bước tiếp theo
         caption[:, i+1] = predicted_id
         cap_mask[:, i+1] = False
+        
+        # Kiểm tra dừng sớm
+        finished |= (predicted_id == sep_token_id)
+        if finished.all():
+            break
 
     return caption
 
@@ -81,7 +92,6 @@ class TwitterImagesDataset(Dataset):
             image = F.resize(image, 299)
             image = self.transform(image)
             
-            # Tạo template caption [1, 128] -> squeeze thành [128] để DataLoader tự stack
             caption, cap_mask = create_caption_and_mask(
                 self.start_token, self.max_position_embeddings)
             
@@ -93,7 +103,6 @@ class TwitterImagesDataset(Dataset):
                 "valid": True
             }
         except Exception as e:
-            # Trả về dummy data nếu lỗi (để không làm crash dataloader)
             return {
                 "image": torch.zeros(3, 299, 299),
                 "caption": torch.zeros(128, dtype=torch.long),
@@ -105,12 +114,17 @@ class TwitterImagesDataset(Dataset):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--image_dir', type=str, default='../vimacsa/image')
-    parser.add_argument('--output_file', type=str, default='visual_captions_catr_original_en.json')
-    parser.add_argument('--batch_size', type=int, default=32) # Batch size lớn để chạy nhanh
+    parser.add_argument('--output_file', type=str, default='visual_captions_catr_original_en_fast.json')
+    parser.add_argument('--batch_size', type=int, default=128) # Batch vừa phải để FP16 tối ưu
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Running on {device} with Batch Size {args.batch_size}...")
+    
+    # [TỐI ƯU 1] Bật cuDNN Benchmark
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        
+    logger.info(f"Running on {device} with Batch Size {args.batch_size} (FP16 Enabled)...")
 
     # Load Model
     model = torch.hub.load('saahiluppal/catr', 'v3', pretrained=True)
@@ -121,31 +135,33 @@ def main():
     config = Config()
     start_token = tokenizer.convert_tokens_to_ids(tokenizer.cls_token)
 
-    # Dataset & Loader
     dataset = TwitterImagesDataset(args.image_dir, start_token, config.max_position_embeddings)
     
-    # [QUAN TRỌNG] Bỏ collate_fn tùy chỉnh, dùng mặc định để stack batch
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=18)
+    # [TỐI ƯU 2] num_workers=2, pin_memory=True
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=2, 
+        pin_memory=True
+    )
 
     img_to_caption = {}
 
     for batch in tqdm(dataloader, desc="Generating"):
-        # Lọc bỏ các mẫu lỗi (nếu có)
         valid_mask = batch['valid']
         if not valid_mask.any(): continue
         
-        images = batch['image'][valid_mask].to(device)
-        captions = batch['caption'][valid_mask].to(device)
-        cap_masks = batch['cap_mask'][valid_mask].to(device)
-        filenames = np.array(batch['file_name'])[valid_mask.cpu().numpy()]
+        # [TỐI ƯU 3] Dùng FP16 (autocast)
+        with torch.amp.autocast('cuda'):
+            images = batch['image'][valid_mask].to(device, non_blocking=True)
+            captions = batch['caption'][valid_mask].to(device, non_blocking=True)
+            cap_masks = batch['cap_mask'][valid_mask].to(device, non_blocking=True)
+            filenames = np.array(batch['file_name'])[valid_mask.cpu().numpy()]
 
-        # Chạy model (Batch processing)
-        # Hàm evaluate này vẫn giữ logic Autoregressive gốc nhưng chạy song song nhiều ảnh
-        outputs = evaluate(model, images, captions, cap_masks, config.max_position_embeddings)
+            outputs = evaluate(model, images, captions, cap_masks, config.max_position_embeddings)
 
-        # Decode kết quả
         for i, output_ids in enumerate(outputs):
-            # Tìm token SEP (102) để cắt chuỗi
             out_list = output_ids.tolist()
             if 102 in out_list:
                 end_idx = out_list.index(102)
@@ -155,7 +171,6 @@ def main():
             result = result.capitalize()
             img_to_caption[filenames[i]] = result
 
-    # Save
     with open(args.output_file, "w", encoding='utf-8') as f:
         json.dump(img_to_caption, f, indent=4)
     
