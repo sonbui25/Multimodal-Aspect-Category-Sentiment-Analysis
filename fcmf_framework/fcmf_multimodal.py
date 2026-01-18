@@ -15,7 +15,7 @@ class FCMF(nn.Module):
         # self.text_pooler = BertPooler()
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
         # self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
-        self.classifier = nn.Linear(HIDDEN_SIZE * 2, num_labels)
+        self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
         # self.apply_custom_init(self.text_pooler)
         self.apply_custom_init(self.classifier)
         self.attention_scorer = nn.Linear(768, 1) # Học trọng số cho từng token
