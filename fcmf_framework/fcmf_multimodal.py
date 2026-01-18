@@ -12,11 +12,11 @@ class FCMF(nn.Module):
     def __init__(self, pretrained_path, num_labels=4, num_imgs = 7, num_roi = 7, alpha=0.7):
         super(FCMF, self).__init__()
         self.encoder = FCMFEncoder(pretrained_path, num_imgs, num_roi, alpha)
-        self.text_pooler = BertPooler()
+        # self.text_pooler = BertPooler()
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
         # self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
         self.classifier = nn.Linear(HIDDEN_SIZE * 2, num_labels)
-        self.apply_custom_init(self.text_pooler)
+        # self.apply_custom_init(self.text_pooler)
         self.apply_custom_init(self.classifier)
         self.attention_scorer = nn.Linear(768, 1) # Học trọng số cho từng token
     # Hàm khởi tạo trọng số chuẩn BERT
@@ -44,10 +44,7 @@ class FCMF(nn.Module):
             sequence_output = output[0] # [Batch, 184, 768] (Gồm Text + Visual)
         else:
             sequence_output = output
-        
-        # 1. Lấy [CLS] Feature (Vẫn lấy từ output gốc để giữ thông tin toàn cục)
-        cls_output = self.text_pooler(sequence_output)
-        
+                
         # 2. Mean Pooling (FIX LỖI SIZE MISMATCH)
         # Lấy chiều dài thực tế của phần văn bản từ mask (thường là 170)
         text_len = attention_mask.shape[1]
@@ -65,11 +62,8 @@ class FCMF(nn.Module):
 
         # 3. Tính tổng có trọng số (Weighted Sum)
         weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1) # [Batch, 768]
-
-        # Kết hợp
-        combined_output = torch.cat((cls_output, weighted_output), dim=1)
         
-        pooled_output = self.dropout(combined_output)
+        pooled_output = self.dropout(weighted_output)
         logits = self.classifier(pooled_output) 
         return logits   
         
