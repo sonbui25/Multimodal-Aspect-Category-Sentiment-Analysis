@@ -58,7 +58,7 @@ class FCMF(nn.Module):
         # 1. Tính điểm quan trọng (Attention Score) cho từng từ
         attn_scores = self.attention_scorer(text_sequence_output).squeeze(-1) # [Batch, 170]
         # Gán điểm rất thấp cho các vị trí padding để Softmax không chọn
-        attn_scores = attn_scores.masked_fill(attention_mask[:, :text_len] == 0, -1e9)
+        attn_scores = attn_scores.masked_fill(attention_mask[:, :text_len] == 0, -1e4)
 
         # 2. Chuyển thành xác suất (Weights)
         attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1) # [Batch, 170, 1]
