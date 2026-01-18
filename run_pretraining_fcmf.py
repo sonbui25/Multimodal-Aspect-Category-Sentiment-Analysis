@@ -158,9 +158,13 @@ def main():
 
     # --- 4. OPTIMIZER ---
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    params = list(model.named_parameters())
+    if args.fine_tune_cnn:
+        params += list(resnet_img.named_parameters())
+        params += list(resnet_roi.named_parameters())
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 0.00001},
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        {'params': [p for n, p in params if not any(nd in n for nd in no_decay)], 'weight_decay': 0.00001},
+        {'params': [p for n, p in params if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     
