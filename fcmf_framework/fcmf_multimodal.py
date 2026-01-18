@@ -14,7 +14,8 @@ class FCMF(nn.Module):
         self.encoder = FCMFEncoder(pretrained_path, num_imgs, num_roi, alpha)
         self.text_pooler = BertPooler()
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
-        self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
+        # self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
+        self.classifier = nn.Linear(HIDDEN_SIZE * 2, num_labels)
         self.apply_custom_init(self.text_pooler)
         self.apply_custom_init(self.classifier)
 
@@ -40,13 +41,26 @@ class FCMF(nn.Module):
         
         output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
         if isinstance(output, tuple):
-            sequence_output = output[0] # get the last hidden states
+            sequence_output = output[0]
         else:
             sequence_output = output
+            
+        # 1. Lấy [CLS] feature (Cách cũ)
+        cls_output = self.text_pooler(sequence_output)
         
-        pooled_output = self.text_pooler(sequence_output)
-        pooled_output = self.dropout(pooled_output)
+        # 2. Tính Mean Pooling (Tận dụng đoạn code bạn đã có)
+        # Lưu ý: seq_len là độ dài text thực tế (do attention_mask quy định)
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(sequence_output.size()).float()
+        sum_embeddings = torch.sum(sequence_output * input_mask_expanded, 1)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        mean_output = sum_embeddings / sum_mask # [Batch, Hidden]
+        
+        # 3. Kết hợp (Concatenate)
+        combined_output = torch.cat((cls_output, mean_output), dim=1) # [Batch, Hidden*2]
+        
+        pooled_output = self.dropout(combined_output)
         logits = self.classifier(pooled_output) 
+        
         return logits   
         
         # # 1. Encoder trả về Full Sequence [Batch, Seq_Len, Hidden]
