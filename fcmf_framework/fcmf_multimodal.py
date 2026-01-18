@@ -18,7 +18,7 @@ class FCMF(nn.Module):
         self.classifier = nn.Linear(HIDDEN_SIZE * 2, num_labels)
         self.apply_custom_init(self.text_pooler)
         self.apply_custom_init(self.classifier)
-
+        self.attention_scorer = nn.Linear(768, 1) # Học trọng số cho từng token
     # Hàm khởi tạo trọng số chuẩn BERT
     def _init_weights(self, module):
         """Initialize the weights"""
@@ -55,16 +55,19 @@ class FCMF(nn.Module):
         # Cắt sequence_output chỉ giữ lại phần Text (bỏ 14 token visual ở đuôi đi)
         text_sequence_output = sequence_output[:, :text_len, :] # [Batch, 170, 768]
         
-        # Bây giờ size đã khớp (170 vs 170), có thể expand mask an toàn
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(text_sequence_output.size()).float()
-        
-        sum_embeddings = torch.sum(text_sequence_output * input_mask_expanded, 1)
-        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-        
-        mean_output = sum_embeddings / sum_mask # [Batch, 768]
-        
-        # 3. Kết hợp và Phân loại
-        combined_output = torch.cat((cls_output, mean_output), dim=1) # [Batch, 768*2]
+        # 1. Tính điểm quan trọng (Attention Score) cho từng từ
+        attn_scores = self.attention_scorer(text_sequence_output).squeeze(-1) # [Batch, 170]
+        # Gán điểm rất thấp cho các vị trí padding để Softmax không chọn
+        attn_scores = attn_scores.masked_fill(attention_mask[:, :text_len] == 0, -1e9)
+
+        # 2. Chuyển thành xác suất (Weights)
+        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1) # [Batch, 170, 1]
+
+        # 3. Tính tổng có trọng số (Weighted Sum)
+        weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1) # [Batch, 768]
+
+        # Kết hợp
+        combined_output = torch.cat((cls_output, weighted_output), dim=1)
         
         pooled_output = self.dropout(combined_output)
         logits = self.classifier(pooled_output) 
