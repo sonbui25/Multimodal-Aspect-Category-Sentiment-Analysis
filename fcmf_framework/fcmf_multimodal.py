@@ -48,7 +48,7 @@ class FCMF(nn.Module):
         # 1. Lấy [CLS] feature (Cách cũ)
         cls_output = self.text_pooler(sequence_output)
         
-        # 2. Tính Mean Pooling (Tận dụng đoạn code bạn đã có)
+        # 2. Tính Mean Pooling
         # Lưu ý: seq_len là độ dài text thực tế (do attention_mask quy định)
         input_mask_expanded = attention_mask.unsqueeze(-1).expand(sequence_output.size()).float()
         sum_embeddings = torch.sum(sequence_output * input_mask_expanded, 1)
