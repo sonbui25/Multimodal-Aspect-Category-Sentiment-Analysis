@@ -17,9 +17,9 @@ class FCMF(nn.Module):
         # self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
         self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
         # self.apply_custom_init(self.text_pooler)
-        self.apply_custom_init(self.classifier)
+        # self.apply_custom_init(self.classifier)
         self.attention_scorer = nn.Linear(768, 1) # Học trọng số cho từng token
-        self.apply_custom_init(self.attention_scorer)
+        # self.apply_custom_init(self.attention_scorer)
     # Hàm khởi tạo trọng số chuẩn BERT
     def _init_weights(self, module):
         """Initialize the weights"""
