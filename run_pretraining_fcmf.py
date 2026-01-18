@@ -253,11 +253,10 @@ def main():
 
                 with torch.amp.autocast('cuda', enabled=args.fp16):
                     # Visual Extraction
-                    with torch.no_grad():
-                         enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
-                         vis_embeds = torch.stack(enc_imgs, dim=1)
-                         enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
-                         roi_embeds = torch.stack(enc_rois, dim=1)
+                    enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
+                    vis_embeds = torch.stack(enc_imgs, dim=1)
+                    enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
+                    roi_embeds = torch.stack(enc_rois, dim=1)
 
                     # --- LOGIC TRAIN---
                     logits = model(
