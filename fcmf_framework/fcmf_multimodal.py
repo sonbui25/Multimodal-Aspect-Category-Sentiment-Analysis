@@ -41,26 +41,33 @@ class FCMF(nn.Module):
         
         output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
         if isinstance(output, tuple):
-            sequence_output = output[0]
+            sequence_output = output[0] # [Batch, 184, 768] (Gồm Text + Visual)
         else:
             sequence_output = output
-            
-        # 1. Lấy [CLS] feature (Cách cũ)
+        
+        # 1. Lấy [CLS] Feature (Vẫn lấy từ output gốc để giữ thông tin toàn cục)
         cls_output = self.text_pooler(sequence_output)
         
-        # 2. Tính Mean Pooling
-        # Lưu ý: seq_len là độ dài text thực tế (do attention_mask quy định)
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(sequence_output.size()).float()
-        sum_embeddings = torch.sum(sequence_output * input_mask_expanded, 1)
-        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-        mean_output = sum_embeddings / sum_mask # [Batch, Hidden]
+        # 2. Mean Pooling (FIX LỖI SIZE MISMATCH)
+        # Lấy chiều dài thực tế của phần văn bản từ mask (thường là 170)
+        text_len = attention_mask.shape[1]
         
-        # 3. Kết hợp (Concatenate)
-        combined_output = torch.cat((cls_output, mean_output), dim=1) # [Batch, Hidden*2]
+        # Cắt sequence_output chỉ giữ lại phần Text (bỏ 14 token visual ở đuôi đi)
+        text_sequence_output = sequence_output[:, :text_len, :] # [Batch, 170, 768]
+        
+        # Bây giờ size đã khớp (170 vs 170), có thể expand mask an toàn
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(text_sequence_output.size()).float()
+        
+        sum_embeddings = torch.sum(text_sequence_output * input_mask_expanded, 1)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        
+        mean_output = sum_embeddings / sum_mask # [Batch, 768]
+        
+        # 3. Kết hợp và Phân loại
+        combined_output = torch.cat((cls_output, mean_output), dim=1) # [Batch, 768*2]
         
         pooled_output = self.dropout(combined_output)
         logits = self.classifier(pooled_output) 
-        
         return logits   
         
         # # 1. Encoder trả về Full Sequence [Batch, Seq_Len, Hidden]
