@@ -16,12 +16,10 @@ class FCMF(nn.Module):
         self.encoder = FCMFEncoder(pretrained_path, num_imgs, num_roi, alpha)
         self.text_pooler = BertPooler()
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
-        self.classifier = nn.Linear(HIDDEN_SIZE * 2, num_labels) # Nhân đôi kích thước đầu vào do kết hợp CLS + Attention Pooling
-        self.attention_scorer = nn.Linear(768, 1) # Học trọng số cho từng token
+        self.classifier = nn.Linear(HIDDEN_SIZE * 2, num_labels) # Nhân đôi kích thước đầu vào do kết hợp CLS + Max Pooling
         # Chỉ khởi tạo các module MỚI (không khởi tạo encoder đã pre-trained)
         self._init_weights(self.text_pooler)
         self._init_weights(self.classifier)
-        self._init_weights(self.attention_scorer)
         
     # Hàm khởi tạo trọng số chuẩn BERT
     def _init_weights(self, module):
@@ -49,29 +47,27 @@ class FCMF(nn.Module):
         else:
             sequence_output = output
         
-        # 1. Lấy [CLS] Feature (Vẫn lấy từ output gốc để giữ thông tin toàn cục)
+        # 1. Lấy [CLS] Feature
         cls_output = self.text_pooler(sequence_output)
         
-        # 2. Mean Pooling (FIX LỖI SIZE MISMATCH)
+        # 2. Max Pooling
         # Lấy chiều dài thực tế của phần văn bản từ mask (thường là 170)
         text_len = attention_mask.shape[1]
         
-        # Cắt sequence_output chỉ giữ lại phần Text (bỏ 14 token visual ở đuôi đi)
+        # Cắt sequence_output chỉ giữ lại phần Text (bỏ token visual ở đuôi đi)
         text_sequence_output = sequence_output[:, :text_len, :] # [Batch, 170, 768]
         
-        # 1. Tính điểm quan trọng (Attention Score) cho từng từ
-        attn_scores = self.attention_scorer(text_sequence_output).squeeze(-1) # [Batch, 170]
-        # Gán điểm rất thấp cho các vị trí padding để Softmax không chọn
-        attn_scores = attn_scores.masked_fill(attention_mask[:, :text_len] == 0, -1e4)
+        # Gán giá trị rất thấp cho vị trí padding trước max pooling
+        # Tạo mask: [Batch, 170, 768]
+        mask_expanded = attention_mask[:, :text_len].unsqueeze(-1).expand(text_sequence_output.size()).float()
+        text_sequence_output_masked = text_sequence_output.clone()
+        text_sequence_output_masked[mask_expanded == 0] = float('-inf')
+        
+        # Max pooling over sequence dimension
+        max_pooled_output, _ = torch.max(text_sequence_output_masked, dim=1) # [Batch, 768]
 
-        # 2. Chuyển thành xác suất (Weights)
-        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1) # [Batch, 170, 1]
-
-        # 3. Tính tổng có trọng số (Weighted Sum)
-        weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1) # [Batch, 768]
-
-        # Kết hợp
-        combined_output = torch.cat((cls_output, weighted_output), dim=1)
+        # Kết hợp CLS + Max Pooling
+        combined_output = torch.cat((cls_output, max_pooled_output), dim=1)
         
         pooled_output = self.dropout(combined_output)
         logits = self.classifier(pooled_output) 
