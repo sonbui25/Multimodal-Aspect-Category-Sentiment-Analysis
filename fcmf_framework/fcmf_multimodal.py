@@ -40,18 +40,16 @@ class FCMF(nn.Module):
         module.apply(self._init_weights)
     def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None):
         
-        # output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
-        # if isinstance(output, tuple):
-        #     sequence_output = output[0] # [Batch, 184, 768] (Gồm Text + Visual)
-        # else:
-        #     sequence_output = output
-                
-        # # 2. Mean Pooling (FIX LỖI SIZE MISMATCH)
-        # # Lấy chiều dài thực tế của phần văn bản từ mask (thường là 170)
-        # text_len = attention_mask.shape[1]
+        output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
+        if isinstance(output, tuple):
+            sequence_output = output[0] # get the last hidden states
+        else:
+            sequence_output = output
         
-        # # Cắt sequence_output chỉ giữ lại phần Text (bỏ 14 token visual ở đuôi đi)
-        # text_sequence_output = sequence_output[:, :text_len, :] # [Batch, 170, 768]
+        pooled_output = self.text_pooler(sequence_output)
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output) 
+        return logits 
         
         # # 1. Tính điểm quan trọng (Attention Score) cho từng từ
         # attn_scores = self.attention_scorer(text_sequence_output).squeeze(-1) # [Batch, 170]
