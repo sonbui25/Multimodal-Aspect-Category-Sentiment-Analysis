@@ -313,7 +313,6 @@ def main():
         
         # Load Best Model
         best_path = f'{args.output_dir}/seed_{args.seed}_ef_captr_model_best.pth'
-        best_path = f'/kaggle/input/best-train-ef-captr-roberta/pytorch/default/1/seed_42_ef_captr_model_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             ckpt = torch.load(best_path, map_location=device)
