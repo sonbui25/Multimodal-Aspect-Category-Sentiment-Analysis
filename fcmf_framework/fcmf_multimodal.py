@@ -15,21 +15,20 @@ class FCMF(nn.Module):
         self.text_pooler = BertPooler()
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
         self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
-        self.apply_custom_init(self.text_pooler)
-        self.apply_custom_init(self.classifier)
+        # self.apply_custom_init(self.text_pooler)
+        # self.apply_custom_init(self.classifier)
         # self.attention_scorer = nn.Linear(768, 1) # Học trọng số cho từng token
         # self.apply_custom_init(self.attention_scorer)
-    # Hàm khởi tạo trọng số Xavier (Glorot)
+    # Hàm khởi tạo trọng số chuẩn BERT
     def _init_weights(self, module):
-        """Initialize the weights using Xavier initialization"""
+        """Initialize the weights"""
         if isinstance(module, nn.Linear):
-            # Xavier Uniform initialization cho Linear layers
-            nn.init.xavier_uniform_(module.weight.data)
+            # Dùng Normal distribution thay vì Uniform mặc định
+            module.weight.data.normal_(mean=0.0, std=0.02)
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
-            # Xavier Normal initialization cho Embedding layers
-            nn.init.xavier_normal_(module.weight.data)
+            module.weight.data.normal_(mean=0.0, std=0.02)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
         elif isinstance(module, nn.LayerNorm):
