@@ -187,7 +187,11 @@ def main():
         layer.attention.self.register_forward_hook(self_attn_hook)
 
     ckpt = torch.load(args.checkpoint_path, map_location=device)
-    model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
+    missing_keys, unexpected_keys = model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt, strict=False)
+    if missing_keys:
+        print(f"[WARNING] Missing keys in checkpoint: {missing_keys[:5]}...")  # Show first 5
+    if unexpected_keys:
+        print(f"[WARNING] Unexpected keys in checkpoint: {unexpected_keys[:5]}...")
     model.eval()
 
     # ResNets & Dataset
