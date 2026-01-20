@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from text_preprocess import *
 from vimacsa_dataset import *
 from fcmf_framework.fcmf_multimodal import FCMF
 from sklearn.metrics import precision_recall_fscore_support
@@ -13,7 +12,6 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 import pandas as pd
-from underthesea import word_tokenize, text_normalize
 from fcmf_framework.resnet_utils import *
 from torchvision.models import resnet152, ResNet152_Weights, resnet50, ResNet50_Weights
 from fcmf_framework.optimization import BertAdam
@@ -176,7 +174,8 @@ def main():
     except:
         raise ValueError("Wrong pretrained model.")
 
-    normalize_class = TextNormalize()
+    # [ABLATION] Removed TextNormalize preprocessing
+    # normalize_class = TextNormalize()
     ASPECT = args.list_aspect
 
     try:
@@ -204,8 +203,9 @@ def main():
         train_data = pd.read_json(f'{args.data_dir}/train.json')
         dev_data = pd.read_json(f'{args.data_dir}/dev.json')
         
-        train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
-        dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+        # [ABLATION] Removed text preprocessing (normalize_class, text_normalize, convert_unicode)
+        # train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+        # dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
 
         if ddp_world_size > 1:
             num_splitted_train = train_data.shape[0] // ddp_world_size
@@ -570,7 +570,8 @@ def main():
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
         
         test_data = pd.read_json(f'{args.data_dir}/test.json')
-        test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+        # [ABLATION] Removed text preprocessing
+        # test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         test_dataset = MACSADataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
