@@ -574,8 +574,7 @@ def main():
         test_dataset = MACSADataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
-        # best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
-        best_path = f'/kaggle/input/0-662-best-implicit-fcmf/pytorch/13_epoch/1/seed_42_fcmf_model_best.pth'
+        best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device, weights_only=False)
