@@ -237,7 +237,7 @@ class FCMFEncoder(nn.Module):
 
         final_multimodal_encoder = self.mm_attention(fusion, extended_attention_mask)
         final_multimodal_encoder = final_multimodal_encoder[-1] 
-        return final_multimodal_encoder
+        return final_multimodal_encoder, enc_attentions
 '''
 class FCMFEncoder(nn.Module):
     def __init__(self, pretrained_hf_path, num_imgs=7, num_roi=4, alpha=0.7):
