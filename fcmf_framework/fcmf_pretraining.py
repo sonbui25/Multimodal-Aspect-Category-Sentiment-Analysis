@@ -382,11 +382,11 @@ class FCMFEncoder(nn.Module):
             )
 
             # Concatenate Text + ROI relations
-            text_roi_output = torch.cat((sequence_output, relative_roi), dim=1) 
+            text_roi_output = torch.cat((sequence_output, relative_roi), dim=1) # [Batch, Seq_Len + Num_ROI, Hidden]
 
             # Multimodal Self-Attention
             roi_multimodal_encoder = self.mm_attention(text_roi_output, text2roi_mask)
-            roi_att_text_output_layer = roi_multimodal_encoder[-1]
+            roi_att_text_output_layer = roi_multimodal_encoder[-1] 
             
             # Pooling
             roi_pooling = self.text2roi_pooler(roi_att_text_output_layer)

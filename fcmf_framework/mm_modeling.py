@@ -145,7 +145,16 @@ class Attention(nn.Module):
 #         q = self.q.expand(mb_size, -1, -1)
 #         return super(SelfAttention, self).forward(k, q)
 
-
+class AttentionPooler(nn.Module):
+    def __init__(self, hidden_size):
+        super(AttentionPooler, self).__init__()
+        self.dense = nn.Linear(hidden_size, hidden_size)
+        self.activation = nn.Tanh()
+    
+    def forward(self, hidden_states):
+        pooled_output = self.dense(hidden_states)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
 class FCMFLayerNorm(nn.Module): 
     def __init__(self, hidden_size, eps=1e-12):
         """Construct a layernorm module in the TF style (epsilon inside the square root).
