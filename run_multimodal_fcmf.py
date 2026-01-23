@@ -159,14 +159,11 @@ def main():
                             args.gradient_accumulation_steps))
         
     args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
-    # KHÔNG chia batch_size cho gradient_accumulation_steps - nó là 2 concept khác nhau
-    # Batch size = kích thước batch thực tế
-    # Gradient accumulation = số bước trước khi update weights
     
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if ddp_world_size > 1:
+    if ddp_world_size > 0:
         torch.cuda.manual_seed_all(args.seed)
         torch.distributed.init_process_group(backend='nccl')
 
