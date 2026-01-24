@@ -24,7 +24,7 @@ import os
 from rouge_score import rouge_scorer
 from bert_score import score
 from torch.cuda.amp import GradScaler
-def save_model(path, model, optimizer, scheduler, epoch, best_score, scaler=None):
+def save_model(path, model, optimizer, scheduler, epoch, best_score=None, scaler=None):
     if hasattr(model, 'module'): model_state = model.module.state_dict()
     else: model_state = model.state_dict()
     
@@ -338,82 +338,90 @@ def main():
                     pbar.set_postfix(loss=total_loss.item() * args.gradient_accumulation_steps)
 
             # --- EVALUATION ---
-            if master_process and args.do_eval:
-                logger.info("***** Running evaluation on Dev Set with BEAM SEARCH *****")
-                model.eval(); resnet_img.eval(); resnet_roi.eval()
+            # if master_process and args.do_eval:
+            #     logger.info("***** Running evaluation on Dev Set with BEAM SEARCH *****")
+            #     model.eval(); resnet_img.eval(); resnet_roi.eval()
                 
-                val_preds = {asp: [] for asp in ASPECT_LIST}
-                val_refs = {asp: [] for asp in ASPECT_LIST}
+            #     val_preds = {asp: [] for asp in ASPECT_LIST}
+            #     val_refs = {asp: [] for asp in ASPECT_LIST}
                 
-                with torch.no_grad():
-                    for batch in tqdm(dev_loader, desc="Eval Beam", leave=False):
-                        batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
+            #     with torch.no_grad():
+            #         for batch in tqdm(dev_loader, desc="Eval Beam", leave=False):
+            #             batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                         
-                        # Unpack đủ 11 biến
-                        (t_img_f, roi_img_f, roi_coors, 
-                         all_labels, dec_input_ids, 
-                         all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
-                         batch_aspect_names, batch_texts) = batch
+            #             # Unpack đủ 11 biến
+            #             (t_img_f, roi_img_f, roi_coors, 
+            #              all_labels, dec_input_ids, 
+            #              all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
+            #              batch_aspect_names, batch_texts) = batch
                         
-                        # Feature Extraction
-                        enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
-                        vis_embeds = torch.stack(enc_imgs, dim=1)
-                        enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
-                        roi_embeds = torch.stack(enc_rois, dim=1)
+            #             # Feature Extraction
+            #             enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
+            #             vis_embeds = torch.stack(enc_imgs, dim=1)
+            #             enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
+            #             roi_embeds = torch.stack(enc_rois, dim=1)
 
-                        # Loop qua Batch Size
-                        batch_size = all_enc_ids.shape[0]
-                        for i in range(batch_size):
-                            aspect_name = batch_aspect_names[i]
+            #             # Loop qua Batch Size
+            #             batch_size = all_enc_ids.shape[0]
+            #             for i in range(batch_size):
+            #                 aspect_name = batch_aspect_names[i]
                             
-                            pred_text = beam_search(
-                                model=model, tokenizer=tokenizer,
-                                enc_ids=all_enc_ids[i],     # [Seq_Len]
-                                enc_mask=all_enc_mask[i],
-                                enc_type=all_enc_type[i],
-                                add_mask=all_add_mask[i],
-                                vis_embeds=vis_embeds[i],
-                                roi_embeds=roi_embeds[i],
-                                roi_coors=roi_coors[i],
-                                beam_size=args.beam_size,
-                                max_len=args.max_len_decoder,
-                                device=device
-                            )[0]
+            #                 pred_text = beam_search(
+            #                     model=model, tokenizer=tokenizer,
+            #                     enc_ids=all_enc_ids[i],     # [Seq_Len]
+            #                     enc_mask=all_enc_mask[i],
+            #                     enc_type=all_enc_type[i],
+            #                     add_mask=all_add_mask[i],
+            #                     vis_embeds=vis_embeds[i],
+            #                     roi_embeds=roi_embeds[i],
+            #                     roi_coors=roi_coors[i],
+            #                     beam_size=args.beam_size,
+            #                     max_len=args.max_len_decoder,
+            #                     device=device
+            #                 )[0]
                             
-                            # Decode Label
-                            lbls = all_labels[i].cpu().numpy()
-                            lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
-                            decoded_lbl = tokenizer.decode(lbls, skip_special_tokens=True)
-                            if pred_text.startswith("n ") and len(pred_text) > 2: pred_text = pred_text[2:]
+            #                 # Decode Label
+            #                 lbls = all_labels[i].cpu().numpy()
+            #                 lbls = np.where(lbls != -100, lbls, tokenizer.pad_token_id)
+            #                 decoded_lbl = tokenizer.decode(lbls, skip_special_tokens=True)
+            #                 if pred_text.startswith("n ") and len(pred_text) > 2: pred_text = pred_text[2:]
                             
-                            val_preds[aspect_name].append(pred_text)
-                            val_refs[aspect_name].append(decoded_lbl)
+            #                 val_preds[aspect_name].append(pred_text)
+            #                 val_refs[aspect_name].append(decoded_lbl)
 
-                logger.info(f"Computing BERTScore for Dev Set using model: {args.bert_score_model} ...")
-                total_P, total_R, total_F1 = 0, 0, 0
-                count_valid = 0
+            #     logger.info(f"Computing BERTScore for Dev Set using model: {args.bert_score_model} ...")
+            #     total_P, total_R, total_F1 = 0, 0, 0
+            #     count_valid = 0
                 
-                for asp in ASPECT_LIST:
-                    if len(val_preds[asp]) > 0:
-                        P, R, F1 = score(val_preds[asp], val_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
-                        p, r, f1 = P.mean().item(), R.mean().item(), F1.mean().item()
-                        total_P += p; total_R += r; total_F1 += f1; count_valid += 1
-                        logger.info(f"  Aspect: {asp:<15} | P: {p:.4f} | R: {r:.4f} | F1: {f1:.4f}")
+            #     for asp in ASPECT_LIST:
+            #         if len(val_preds[asp]) > 0:
+            #             P, R, F1 = score(val_preds[asp], val_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
+            #             p, r, f1 = P.mean().item(), R.mean().item(), F1.mean().item()
+            #             total_P += p; total_R += r; total_F1 += f1; count_valid += 1
+            #             logger.info(f"  Aspect: {asp:<15} | P: {p:.4f} | R: {r:.4f} | F1: {f1:.4f}")
                 
-                avg_val_F1 = total_F1 / count_valid if count_valid > 0 else 0
-                logger.info(f"Epoch {epoch} [Macro-Avg] F1: {avg_val_F1:.4f}")
+            #     avg_val_F1 = total_F1 / count_valid if count_valid > 0 else 0
+            #     logger.info(f"Epoch {epoch} [Macro-Avg] F1: {avg_val_F1:.4f}")
 
-                if avg_val_F1 > max_f1_score:
-                    max_f1_score = avg_val_F1
-                    logger.info(f"New Best F1-Score ({max_f1_score:.4f})! Saving model...")
-                    save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                    save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+            #     if avg_val_F1 > max_f1_score:
+            #         max_f1_score = avg_val_F1
+            #         logger.info(f"New Best F1-Score ({max_f1_score:.4f})! Saving model...")
+            #         save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+            #         save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_best.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+            #         save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_best.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
                     
-                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
-                print("\n")
+            #     save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+            #     save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+            #     save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, best_score=max_f1_score, scaler=scaler)
+            #     print("\n")
+
+            # --- SAVE MODEL EVERY EPOCH (No Eval) ---
+            if master_process:
+                logger.info(f"Epoch {epoch} completed! Saving model checkpoint...")
+                save_model(f'{args.output_dir}/seed_{args.seed}_iaog_model_last.pth', model, optimizer, scheduler, epoch, scaler=scaler)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resimg_model_last.pth', resnet_img, optimizer, scheduler, epoch, scaler=scaler)
+                save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, scaler=scaler)
+                logger.info("Model checkpoint saved!\n")
 
     # --- 6. TEST (WITH BEAM SEARCH & FULL ROUGE) ---
     if args.do_eval and master_process:
