@@ -294,7 +294,7 @@ def main():
                     scheduler.step(); optimizer.zero_grad()
                     
                     # --- DEBUG: Print predictions để xem mô hình đang generate cái gì ---
-                    if master_process and step % 1 == 0:  # In mỗi n steps
+                    if master_process and step % 10 == 0:  # In mỗi n steps
                         with torch.no_grad():
                             # Lấy predicted tokens từ logits
                             pred_ids = torch.argmax(logits, dim=-1)  # [Batch, Dec_Len]
@@ -310,13 +310,6 @@ def main():
                                 enc_text = tokenizer.decode(enc_seq, skip_special_tokens=True)
                                 logger.info(f"[ENCODER INPUT]")
                                 logger.info(f"  {enc_text}")
-                                logger.info("")
-                                
-                                # DECODER INPUT
-                                dec_seq = dec_input_ids[i].cpu().numpy()
-                                dec_text = tokenizer.decode(dec_seq, skip_special_tokens=True)
-                                logger.info(f"[DECODER INPUT]")
-                                logger.info(f"  {dec_text}")
                                 logger.info("")
                                 
                                 # PREDICTION
