@@ -292,6 +292,29 @@ def main():
                     if args.fp16: scaler.step(optimizer); scaler.update()
                     else: optimizer.step()
                     scheduler.step(); optimizer.zero_grad()
+                    
+                    # --- DEBUG: Print predictions để xem mô hình đang generate cái gì ---
+                    if master_process and step % 5 == 0:  # In mỗi n steps
+                        with torch.no_grad():
+                            # Lấy predicted tokens từ logits
+                            pred_ids = torch.argmax(logits, dim=-1)  # [Batch, Dec_Len]
+                            
+                            # Decode một vài samples từ batch
+                            for i in range(min(2, pred_ids.shape[0])):  # In 2 samples
+                                # Prediction
+                                pred_seq = pred_ids[i].cpu().numpy()
+                                pred_seq = np.where(pred_seq != tokenizer.pad_token_id, pred_seq, tokenizer.pad_token_id)
+                                pred_text = tokenizer.decode(pred_seq, skip_special_tokens=True)
+                                
+                                # Label
+                                label_seq = labels[i].cpu().numpy()
+                                label_seq = np.where(label_seq != -100, label_seq, tokenizer.pad_token_id)
+                                label_text = tokenizer.decode(label_seq, skip_special_tokens=True)
+                                
+                                logger.info(f"Step {step} | Sample {i}:")
+                                logger.info(f"  [PRED] {pred_text}")
+                                logger.info(f"  [LABEL] {label_text}")
+                    
                     pbar.set_postfix(loss=total_loss.item() * args.gradient_accumulation_steps)
 
             # --- EVALUATION ---
