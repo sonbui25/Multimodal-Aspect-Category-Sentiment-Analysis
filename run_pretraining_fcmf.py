@@ -301,19 +301,39 @@ def main():
                             
                             # Decode một vài samples từ batch
                             for i in range(min(2, pred_ids.shape[0])):  # In 2 samples
-                                # Prediction
+                                logger.info("=" * 80)
+                                logger.info(f"STEP {step} | SAMPLE {i}:")
+                                logger.info("=" * 80)
+                                
+                                # ENCODER INPUT
+                                enc_seq = enc_ids[i].cpu().numpy()
+                                enc_text = tokenizer.decode(enc_seq, skip_special_tokens=True)
+                                logger.info(f"[ENCODER INPUT]")
+                                logger.info(f"  {enc_text}")
+                                logger.info("")
+                                
+                                # DECODER INPUT
+                                dec_seq = dec_input_ids[i].cpu().numpy()
+                                dec_text = tokenizer.decode(dec_seq, skip_special_tokens=True)
+                                logger.info(f"[DECODER INPUT]")
+                                logger.info(f"  {dec_text}")
+                                logger.info("")
+                                
+                                # PREDICTION
                                 pred_seq = pred_ids[i].cpu().numpy()
                                 pred_seq = np.where(pred_seq != tokenizer.pad_token_id, pred_seq, tokenizer.pad_token_id)
                                 pred_text = tokenizer.decode(pred_seq, skip_special_tokens=True)
+                                logger.info(f"[PREDICTION]")
+                                logger.info(f"  {pred_text}")
+                                logger.info("")
                                 
-                                # Label
+                                # LABEL (Ground Truth)
                                 label_seq = labels[i].cpu().numpy()
                                 label_seq = np.where(label_seq != -100, label_seq, tokenizer.pad_token_id)
                                 label_text = tokenizer.decode(label_seq, skip_special_tokens=True)
-                                
-                                logger.info(f"Step {step} | Sample {i}:")
-                                logger.info(f"  [PRED] {pred_text}")
-                                logger.info(f"  [LABEL] {label_text}")
+                                logger.info(f"[LABEL]")
+                                logger.info(f"  {label_text}")
+                                logger.info("=" * 80 + "\n")
                     
                     pbar.set_postfix(loss=total_loss.item() * args.gradient_accumulation_steps)
 
