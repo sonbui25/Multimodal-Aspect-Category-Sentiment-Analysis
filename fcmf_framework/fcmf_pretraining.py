@@ -149,7 +149,7 @@ def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask,
     pred_text = pred_text.strip()
     
     return [pred_text]
-'''
+
 class FCMFEncoder(nn.Module):
     def __init__(self, pretrained_hf_path, num_imgs=7, num_roi=4, alpha=0.7):
         super(FCMFEncoder, self).__init__()
@@ -171,7 +171,7 @@ class FCMFEncoder(nn.Module):
         self.text2roi_pooler = BertPooler()
         
         # [NEW] Multimodal Denoising Encoder (MDE)
-        self.MultimodalDenoisingEncoder = MultimodalDenoisingEncoder(alpha=alpha)
+        # self.MultimodalDenoisingEncoder = MultimodalDenoisingEncoder(alpha=alpha)
         
         self.mm_attention = MultimodalEncoder()
 
@@ -195,35 +195,35 @@ class FCMFEncoder(nn.Module):
             extended_img_mask_orig = (1.0 - extended_img_mask_orig) * -10000.0
 
             # --- B. MULTIMODAL DENOISING (MDE) ---
-            if self.alpha < 1.0:
-                # Apply MDE to filter weak patches based on text guidance
-                image_features_denoised = self.MultimodalDenoisingEncoder(
-                    sequence_output, 
-                    converted_img_embed_map
-                )
+            # if self.alpha < 1.0:
+            #     # Apply MDE to filter weak patches based on text guidance
+            #     image_features_denoised = self.MultimodalDenoisingEncoder(
+            #         sequence_output, 
+            #         converted_img_embed_map
+            #     )
                 
-                # Create NEW Mask for the filtered patches (k patches)
-                k_size = image_features_denoised.size(1) 
-                batch_size = image_features_denoised.size(0)
-                device = image_features_denoised.device
+            #     # Create NEW Mask for the filtered patches (k patches)
+            #     k_size = image_features_denoised.size(1) 
+            #     batch_size = image_features_denoised.size(0)
+            #     device = image_features_denoised.device
                 
-                # Assume all filtered patches are valid (1)
-                new_img_mask = torch.ones((batch_size, k_size), device=device)
+            #     # Assume all filtered patches are valid (1)
+            #     new_img_mask = torch.ones((batch_size, k_size), device=device)
                 
-                # Extend mask for Attention (1.0 for valid, -10000.0 for masked)
-                extended_new_mask = new_img_mask.unsqueeze(1).unsqueeze(2)
-                extended_new_mask = extended_new_mask.to(dtype=image_features_denoised.dtype)
-                extended_new_mask = (1.0 - extended_new_mask) * -10000.0
-            else:
+            #     # Extend mask for Attention (1.0 for valid, -10000.0 for masked)
+            #     extended_new_mask = new_img_mask.unsqueeze(1).unsqueeze(2)
+            #     extended_new_mask = extended_new_mask.to(dtype=image_features_denoised.dtype)
+            #     extended_new_mask = (1.0 - extended_new_mask) * -10000.0
+            # else:
                 # No denoising, use full features
-                image_features_denoised = converted_img_embed_map
-                extended_new_mask = extended_img_mask_orig
+                # image_features_denoised = converted_img_embed_map
+                # extended_new_mask = extended_img_mask_orig
 
             # --- C. CROSS-MODAL ATTENTION ---
             text2img_cross_attention = self.text2img_attention(
                 sequence_output, 
-                image_features_denoised, 
-                extended_new_mask
+                converted_img_embed_map, 
+                extended_img_mask_orig
             )
             text2img_output_layer = text2img_cross_attention[-1]
             text2img_cross_output = self.text2img_pooler(text2img_output_layer) 
@@ -268,7 +268,6 @@ class FCMFEncoder(nn.Module):
 
         # Fusion: [CLS] + Image Features + ROI Features
         fusion = torch.cat((sequence_output[:, 0, :].unsqueeze(1), all_h_i_features, all_r_i_features), dim=1)
-        print("Fusion Size:", fusion.size())
         # Create mask for fusion layer (1 + Num_Img + Num_Img)
         comb_attention_mask = added_attention_mask[:, :1 + self.num_imgs * 2]
         extended_attention_mask = comb_attention_mask.unsqueeze(1).unsqueeze(2)
@@ -278,9 +277,7 @@ class FCMFEncoder(nn.Module):
         # Final Multimodal Encoding
         final_multimodal_encoder = self.mm_attention(fusion, extended_attention_mask)
         final_multimodal_encoder = final_multimodal_encoder[-1] 
-        print("Final Multimodal Encoder Size:", final_multimodal_encoder.size())
-
-        return final_multimodal_encoder
+        return final_multimodal_encoder, enc_attentions
 '''
 class FCMFEncoder(nn.Module):
     def __init__(self, pretrained_hf_path, num_imgs=7, num_roi=4, alpha=0.7):
@@ -435,7 +432,7 @@ class FCMFEncoder(nn.Module):
         # Ta lấy layer cuối cùng:
         # in ra kich thuoc cua final_multimodal_encoder
         return final_multimodal_encoder[-1], enc_attentions
-
+'''
 class FCMFSeq2Seq(nn.Module):
     def __init__(self, vocab_size, max_len_decoder, pretrained_hf_path, num_imgs, num_roi, alpha):
         super(FCMFSeq2Seq, self).__init__()
@@ -449,7 +446,7 @@ class FCMFSeq2Seq(nn.Module):
         self.encoder.box_head.apply(self._init_weights)
         self.encoder.text2img_attention.apply(self._init_weights)
         self.encoder.mm_attention.apply(self._init_weights)
-        self.encoder.MultimodalDenoisingEncoder.apply(self._init_weights)
+        # self.encoder.MultimodalDenoisingEncoder.apply(self._init_weights)
         
         # 1. Ép BERT về đúng 15002 (khớp với tokenizer)
         if hasattr(self.encoder.bert.cell, 'resize_token_embeddings'):
