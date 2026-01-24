@@ -87,7 +87,8 @@ class IAOGDataset(Dataset):
         added_mask = torch.tensor([1] * (170 + 49))
 
         # 3. DECODER
-        dec_text = f"{target_sentiment}".lower()
+        # Format: ASPECT target_sentiment (thay vì chỉ target_sentiment)
+        dec_text = f"{target_aspect} {target_sentiment}".lower().replace('_', ' ')
         dec = self.tokenizer(dec_text, max_length=self.max_len_decoder, padding='max_length', truncation=True, return_tensors='pt')
         dec_input_ids = dec['input_ids'].squeeze(0)
         labels = torch.roll(dec_input_ids, shifts=-1, dims=0)
