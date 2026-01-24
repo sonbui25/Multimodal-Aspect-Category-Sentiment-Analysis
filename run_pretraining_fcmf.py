@@ -294,7 +294,7 @@ def main():
                     scheduler.step(); optimizer.zero_grad()
                     
                     # --- DEBUG: Print predictions để xem mô hình đang generate cái gì ---
-                    if master_process and step % 5 == 0:  # In mỗi n steps
+                    if master_process and step % 1 == 0:  # In mỗi n steps
                         with torch.no_grad():
                             # Lấy predicted tokens từ logits
                             pred_ids = torch.argmax(logits, dim=-1)  # [Batch, Dec_Len]
