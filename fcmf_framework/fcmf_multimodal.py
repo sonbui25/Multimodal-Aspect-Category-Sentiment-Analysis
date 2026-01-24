@@ -50,29 +50,29 @@ class FCMF(nn.Module):
         # 1. Lấy [CLS] Feature (Vẫn lấy từ output gốc để giữ thông tin toàn cục)
         cls_output = self.text_pooler(sequence_output)
         
-        # 2. Attention Pooling - bỏ CLS token
-        # Lấy chiều dài thực tế của phần văn bản từ mask (thường là 170)
-        text_len = attention_mask.shape[1]
+        # # 2. Attention Pooling - bỏ CLS token
+        # # Lấy chiều dài thực tế của phần văn bản từ mask (thường là 170)
+        # text_len = attention_mask.shape[1]
         
-        # Cắt sequence_output chỉ giữ lại phần Text (bỏ CLS token ở vị trí 0, bỏ 14 token visual ở đuôi)
-        # Lấy từ vị trí 1 trở đi (skip CLS token)
-        text_sequence_output = sequence_output[:, 1:text_len, :] # [Batch, 169, 768]
+        # # Cắt sequence_output chỉ giữ lại phần Text (bỏ CLS token ở vị trí 0, bỏ 14 token visual ở đuôi)
+        # # Lấy từ vị trí 1 trở đi (skip CLS token)
+        # text_sequence_output = sequence_output[:, 1:text_len, :] # [Batch, 169, 768]
         
-        # Tính điểm quan trọng (Attention Score) cho từng từ (trừ CLS)
-        attn_scores = self.attention_scorer(text_sequence_output).squeeze(-1) # [Batch, 169]
-        # Gán điểm rất thấp cho các vị trí padding để Softmax không chọn (cũng skip vị trí 0 của mask)
-        attn_scores = attn_scores.masked_fill(attention_mask[:, 1:text_len] == 0, -1e4)
+        # # Tính điểm quan trọng (Attention Score) cho từng từ (trừ CLS)
+        # attn_scores = self.attention_scorer(text_sequence_output).squeeze(-1) # [Batch, 169]
+        # # Gán điểm rất thấp cho các vị trí padding để Softmax không chọn (cũng skip vị trí 0 của mask)
+        # attn_scores = attn_scores.masked_fill(attention_mask[:, 1:text_len] == 0, -1e4)
 
-        # 2. Chuyển thành xác suất (Weights)
-        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1) # [Batch, 169, 1]
+        # # 2. Chuyển thành xác suất (Weights)
+        # attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1) # [Batch, 169, 1]
 
-        # 3. Tính tổng có trọng số (Weighted Sum)
-        weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1) # [Batch, 768]
-        # weighted_output = self.attention_pooler(weighted_output)  # [Batch, 768]
-        # Kết hợp
-        combined_output = torch.cat((cls_output, weighted_output), dim=1)
+        # # 3. Tính tổng có trọng số (Weighted Sum)
+        # weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1) # [Batch, 768]
+        # # weighted_output = self.attention_pooler(weighted_output)  # [Batch, 768]
+        # # Kết hợp
+        # combined_output = torch.cat((cls_output, weighted_output), dim=1)
         
-        pooled_output = self.dropout(combined_output)
+        pooled_output = self.dropout(cls_output)
         logits = self.classifier(pooled_output) 
         return logits
        
