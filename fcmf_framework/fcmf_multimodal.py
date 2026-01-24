@@ -40,14 +40,14 @@ class FCMF(nn.Module):
         module.apply(self._init_weights)
     def forward(self, input_ids, visual_embeds_att, roi_embeds_att, roi_coors = None, token_type_ids=None, attention_mask=None, added_attention_mask=None):
         
-        # output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
-        # if isinstance(output, tuple):
-        #     sequence_output = output[0] # [Batch, 184, 768] (Gồm Text + Visual)
-        # else:
-        #     sequence_output = output
+        output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
+        if isinstance(output, tuple):
+            sequence_output = output[0] # [Batch, 184, 768] (Gồm Text + Visual)
+        else:
+            sequence_output = output
         
-        # # 1. Lấy [CLS] Feature (Vẫn lấy từ output gốc để giữ thông tin toàn cục)
-        # cls_output = self.text_pooler(sequence_output)
+        # 1. Lấy [CLS] Feature (Vẫn lấy từ output gốc để giữ thông tin toàn cục)
+        cls_output = self.text_pooler(sequence_output)
         
         # # 2. Attention Pooling - bỏ CLS token
         # # Lấy chiều dài thực tế của phần văn bản từ mask (thường là 170)
@@ -71,43 +71,43 @@ class FCMF(nn.Module):
         # # Kết hợp
         # # combined_output = torch.cat((cls_output, weighted_output), dim=1)
         
-        # pooled_output = self.dropout(weighted_output)
-        # logits = self.classifier(pooled_output) 
-        # return logits
-       
-        # weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1)
-        # weighted_output = self.attention_pooler(weighted_output)  # [Batch, 768]
-
-        # combined_output = torch.cat((cls_output, weighted_output), dim=1)
-        
-        
-        # 1. Encoder trả về Full Sequence [Batch, Seq_Len, Hidden]
-        sequence_output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
-        if isinstance(sequence_output, tuple): 
-            sequence_output = sequence_output[0]
-
-        # 2. [THAY ĐỔI LỚN] max POOLING thay vì lấy CLS
-        # Tạo mask để không tính trung bình vào các token padding
-        # attention_mask shape: [Batch, Seq_Len]
-        
-        # Lấy độ dài của mask văn bản (170)
-        seq_len = attention_mask.shape[1] 
-        
-        # Chỉ lấy phần output tương ứng với văn bản (bỏ phần đuôi ảnh đi)
-        # Lưu ý: Phần text này ĐÃ chứa thông tin ảnh nhờ cơ chế Attention.
-        text_output = sequence_output[:, :seq_len, :] # [Batch, 170, 768]
-
-        # 2. max Pooling (kích thước đã khớp 170 vs 170)
-        mask_expanded = attention_mask.unsqueeze(-1).expand(text_output.size()).float()
-        
-        # sum_embeddings = torch.sum(text_output * mask_expanded, 1)
-        # sum_mask = mask_expanded.sum(1)
-        # sum_mask = torch.clamp(sum_mask, min=1e-9)
-        
-        max_pooled_output, _ = torch.max(text_output * mask_expanded, 1)
-        
-        # 3. Phân loại
-        pooled_output = self.dropout(max_pooled_output)
-        logits = self.classifier(pooled_output)
-
+        pooled_output = self.dropout(cls_output)
+        logits = self.classifier(pooled_output) 
         return logits
+       
+        weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1)
+        weighted_output = self.attention_pooler(weighted_output)  # [Batch, 768]
+
+        combined_output = torch.cat((cls_output, weighted_output), dim=1)
+        
+        
+        # # 1. Encoder trả về Full Sequence [Batch, Seq_Len, Hidden]
+        # sequence_output = self.encoder(input_ids, visual_embeds_att, roi_embeds_att, roi_coors, token_type_ids, attention_mask, added_attention_mask)
+        # if isinstance(sequence_output, tuple): 
+        #     sequence_output = sequence_output[0]
+
+        # # 2. [THAY ĐỔI LỚN] max POOLING thay vì lấy CLS
+        # # Tạo mask để không tính trung bình vào các token padding
+        # # attention_mask shape: [Batch, Seq_Len]
+        
+        # # Lấy độ dài của mask văn bản (170)
+        # seq_len = attention_mask.shape[1] 
+        
+        # # Chỉ lấy phần output tương ứng với văn bản (bỏ phần đuôi ảnh đi)
+        # # Lưu ý: Phần text này ĐÃ chứa thông tin ảnh nhờ cơ chế Attention.
+        # text_output = sequence_output[:, :seq_len, :] # [Batch, 170, 768]
+
+        # # 2. max Pooling (kích thước đã khớp 170 vs 170)
+        # mask_expanded = attention_mask.unsqueeze(-1).expand(text_output.size()).float()
+        
+        # # sum_embeddings = torch.sum(text_output * mask_expanded, 1)
+        # # sum_mask = mask_expanded.sum(1)
+        # # sum_mask = torch.clamp(sum_mask, min=1e-9)
+        
+        # max_pooled_output, _ = torch.max(text_output * mask_expanded, 1)
+        
+        # # 3. Phân loại
+        # pooled_output = self.dropout(max_pooled_output)
+        # logits = self.classifier(pooled_output)
+
+        # return logits
