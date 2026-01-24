@@ -19,7 +19,7 @@ class FCMF(nn.Module):
         # self.classifier = nn.Linear(HIDDEN_SIZE * 2, num_labels)
         # self.apply_custom_init(self.text_pooler)
         # self.apply_custom_init(self.classifier)
-        self.attention_scorer = nn.Linear(768, 1) # Học trọng số cho từng token
+        # self.attention_scorer = nn.Linear(768, 1) # Học trọng số cho từng token
         # self.attention_pooler = AttentionPooler(HIDDEN_SIZE)
     # Hàm khởi tạo trọng số chuẩn BERT
     def _init_weights(self, module):
@@ -76,10 +76,10 @@ class FCMF(nn.Module):
         logits = self.classifier(pooled_output) 
         return logits
        
-        weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1)
-        weighted_output = self.attention_pooler(weighted_output)  # [Batch, 768]
+        # weighted_output = torch.sum(text_sequence_output * attn_weights, dim=1)
+        # weighted_output = self.attention_pooler(weighted_output)  # [Batch, 768]
 
-        combined_output = torch.cat((cls_output, weighted_output), dim=1)
+        # combined_output = torch.cat((cls_output, weighted_output), dim=1)
         
         
         # # 1. Encoder trả về Full Sequence [Batch, Seq_Len, Hidden]
