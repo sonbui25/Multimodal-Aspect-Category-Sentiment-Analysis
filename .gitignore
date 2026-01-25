@@ -5,7 +5,7 @@ data/
 
 #Model
 checkpoints/*.pth
-
+*.pth
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
