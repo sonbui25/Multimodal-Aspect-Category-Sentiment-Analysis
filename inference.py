@@ -22,16 +22,21 @@ from loguru import logger
 import sys
 import os
 
+# Set random seeds for reproducibility
+def set_seed(seed=42):
+    """Set random seed for reproducible results"""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+
+# Call this at startup
+set_seed(37)
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 ASPECT = ['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area']
 IMG_ASPECT = ['Food', 'Room', 'Facilities', 'Service', 'Public_area']
 POLARITY = ['None','Negative','Neutral','Positive']
-BASE_PATH = 'checkpoints_ViIM_FCMF'
-YOLO_PATH = './checkpoints_yolo/yolov8m.pt'
-WEIGHT_ROI_PATH = f'./{BASE_PATH}/seed_42_resroi_model_best.pth'
-WEIGHT_IMAGE_PATH = f'./{BASE_PATH}/seed_42_resimg_model_best.pth'
-FCMF_CHECKPOINT = f'./{BASE_PATH}/seed_42_fcmf_model_best.pth'
-VISUAL_MODEL_CHECKPOINT = './4_visual_model.pth'
+
 
 logger.add(sys.stderr, format="{time} {level} {message}", filter="my_module", level="INFO")
 # logger.add("file_{time}.log")  # Disabled - use --output_file instead,
@@ -63,6 +68,7 @@ def load_yolo_roi_model(yolo_path,weight_roi_path):
     # Set YOLO to CPU - torchvision NMS doesn't support CUDA
     yolo_model.to('cpu')
     logger.info("YOLO model set to CPU (torchvision NMS compatibility)")
+    logger.info("Note: YOLO uses inference mode automatically for predict()")
 
     # Check ROI weight path
     weight_roi_path = check_file_exists(weight_roi_path)
@@ -128,6 +134,7 @@ def load_image_model(weight_image_path):
         raise ValueError(f"Wrong Image weight path or corrupted file: {e}")
 
     image_model.eval()
+    logger.info("✓ Image model set to eval mode")
 
     return image_model
 
@@ -140,7 +147,7 @@ def load_fcmf_model(fcmf_checkpoint,visual_checkpoint, pretrained_model, num_img
     fcmf_model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
     logger.info(f"Resized token embeddings to {len(tokenizer)}")
 
-    visual_model = resnet152(weights = ResNet152_Weights.IMAGENET1K_V2)
+    visual_model = MyImgModel(len(IMG_ASPECT))  # Use MyImgModel instead of ResNet152
     visual_model.to(device)
     
     # Check FCMF checkpoint path
@@ -153,14 +160,45 @@ def load_fcmf_model(fcmf_checkpoint,visual_checkpoint, pretrained_model, num_img
         fcmf_ckpt_data = load_model(fcmf_checkpoint)
         # Try to load with strict=False
         try:
+            # Step 1: Try loading directly without key renaming
             result = fcmf_model.load_state_dict(fcmf_ckpt_data['model_state_dict'], strict=False)
             
+            # Check if there are missing keys - if yes, try renaming strategy
             if result.missing_keys:
-                logger.warning(f"FCMF Missing keys ({len(result.missing_keys)}): {result.missing_keys[:3]}...")
+                logger.warning(f"Found {len(result.missing_keys)} missing keys, attempting key renaming...")
+                
+                state_dict = fcmf_ckpt_data['model_state_dict']
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    new_key = key
+                    
+                    # Step 1: Rename all ent* -> text* (covers ent2img_attention, ent2roi_attention, ent2img_pooler, ent2roi_pooler, etc.)
+                    new_key = new_key.replace('ent2img', 'text2img')
+                    new_key = new_key.replace('ent2roi', 'text2roi')
+                    
+                    # Step 2: Rename comb_attention -> mm_attention (multimodal attention)
+                    new_key = new_key.replace('comb_attention', 'mm_attention')
+                    
+                    # Step 3: Remove 'encoder.' prefix from text_pooler and classifier (they should be at top level)
+                    if new_key.startswith('encoder.text_pooler.') or new_key.startswith('encoder.classifier.'):
+                        new_key = new_key.replace('encoder.', '', 1)  # Remove only first occurrence
+                    
+                    # Step 4: Add 'encoder.' prefix if not already present (for encoder layers)
+                    if not new_key.startswith('encoder.') and not new_key.startswith('decoder.') and \
+                       not new_key.startswith('text_pooler.') and not new_key.startswith('classifier.'):
+                        new_key = 'encoder.' + new_key
+                    
+                    new_state_dict[new_key] = value
+                
+                result = fcmf_model.load_state_dict(new_state_dict, strict=False)
+                logger.info(f"✓ FCMF model loaded successfully with key renaming")
+            else:
+                logger.info("✓ FCMF model loaded successfully without key renaming")
+            
+            if result.missing_keys:
+                logger.warning(f"FCMF Remaining missing keys ({len(result.missing_keys)}): {result.missing_keys[:3]}...")
             if result.unexpected_keys:
                 logger.warning(f"FCMF Unexpected keys ({len(result.unexpected_keys)}): {result.unexpected_keys[:3]}...")
-            
-            logger.info("✓ FCMF model loaded successfully")
         except RuntimeError as e:
             # If size mismatch, try to skip embedding layer
             if "size mismatch" in str(e):
@@ -199,6 +237,11 @@ def load_fcmf_model(fcmf_checkpoint,visual_checkpoint, pretrained_model, num_img
             logger.warning(f"Could not load visual model checkpoint: {e}")
             logger.warning("Using ResNet152 with pretrained ImageNet weights instead")
     
+    # Set models to eval mode for inference
+    fcmf_model.eval()
+    visual_model.eval()
+    logger.info("✓ FCMF and Visual models set to eval mode for inference")
+    
     return fcmf_model, visual_model
 
 # ============================  GETTING VISUAL FEATURES ============================ 
@@ -215,19 +258,25 @@ def get_visual_features(yolo_model, visual_model, list_image_path, num_imgs, num
         encoded_roi = []
 
         for img_idx in range(num_imgs):
-            img_features = image_encoder(visual_model,t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1) # batch_size, 49, 2048
+            # For MyImgModel: extract features from no_fc (ResNet backbone without FC layer)
+            img_raw = t_img_features[:,img_idx,:]  # shape: (batch, 3, 224, 224)
+            img_features = visual_model.no_fc(img_raw)  # Get ResNet features: (batch, 2048, 7, 7)
+            img_features = F.adaptive_avg_pool2d(img_features, [7, 7])  # Ensure (batch, 2048, 7, 7)
+            img_features = img_features.view(-1, 2048, 49).permute(0, 2, 1).squeeze(1)  # (batch_size, 49, 2048)
             encoded_img.append(img_features)
 
             roi_f = []
             for roi_idx in range(num_rois):
-                roi_features = roi_encoder(visual_model,roi_img_features[:,img_idx,roi_idx,:]).squeeze(1) # batch_size, 1, 2048
+                roi_raw = roi_img_features[:,img_idx,roi_idx,:]  # shape: (batch, 3, 224, 224)
+                roi_features = visual_model.no_fc(roi_raw)  # Get ResNet features: (batch, 2048, 7, 7)
+                roi_features = roi_features.squeeze(-1).squeeze(-1)  # Squeeze spatial dims: (batch, 2048)
                 roi_f.append(roi_features)
 
-            roi_f = torch.stack(roi_f,dim=1)
+            roi_f = torch.stack(roi_f, dim=1)  # (batch, num_rois, 2048)
             encoded_roi.append(roi_f)
 
-        encoded_img = torch.stack(encoded_img,dim=1) # batch_size, num_img, 49, 2048   
-        encoded_roi = torch.stack(encoded_roi,dim=1) # batch_size, num_img, num_roi, 49,2048
+        encoded_img = torch.stack(encoded_img, dim=1)  # (batch_size, num_img, 49, 2048)   
+        encoded_roi = torch.stack(encoded_roi, dim=1)  # (batch_size, num_img, num_roi, 2048)
 
     return roi_coors, encoded_img, encoded_roi
 
@@ -252,27 +301,28 @@ def fcmf_predict_wrapper(tokenizer, text, IMG_ASPECT, ASPECT, list_image_path, n
     logger.info('making prediction')
     print("============ MAKING PREDICTION ============")
     rs = {asp:'None' for asp in ASPECT}
-    for id_asp in range(len(ASPECT)):
-        asp = ASPECT[id_asp]
-        combine_text = f"{asp} </s></s> {text}"
-        combine_text = combine_text.lower().replace('_',' ')
-        tokens = tokenizer(combine_text, joined_aspect, max_length=170,truncation='only_first',padding='max_length', return_token_type_ids=True)
+    with torch.no_grad():  # Disable gradient computation for inference
+        for id_asp in range(len(ASPECT)):
+            asp = ASPECT[id_asp]
+            combine_text = f"{asp} </s></s> {text}"
+            combine_text = combine_text.lower().replace('_',' ')
+            tokens = tokenizer(combine_text, joined_aspect, max_length=170,truncation='only_first',padding='max_length', return_token_type_ids=True)
 
-        input_ids = torch.tensor(tokens['input_ids']).unsqueeze(0).to(device)
-        token_type_ids = torch.tensor(tokens['token_type_ids']).unsqueeze(0).to(device)
-        attention_mask = torch.tensor(tokens['attention_mask']).unsqueeze(0).to(device)
-        added_input_mask =torch.tensor( [1] * (170+49)).unsqueeze(0).to(device)
+            input_ids = torch.tensor(tokens['input_ids']).unsqueeze(0).to(device)
+            token_type_ids = torch.tensor(tokens['token_type_ids']).unsqueeze(0).to(device)
+            attention_mask = torch.tensor(tokens['attention_mask']).unsqueeze(0).to(device)
+            added_input_mask =torch.tensor( [1] * (170+49)).unsqueeze(0).to(device)
 
-        logits = fcmf_model(
-            input_ids = input_ids, token_type_ids = token_type_ids, attention_mask = attention_mask, 
-            added_attention_mask = added_input_mask,
-            visual_embeds_att = encoded_img,
-            roi_embeds_att = encoded_roi,
-            roi_coors = roi_coors
-        )
-        pred = np.argmax(logits.detach().cpu(),axis = -1)
+            logits = fcmf_model(
+                input_ids = input_ids, token_type_ids = token_type_ids, attention_mask = attention_mask, 
+                added_attention_mask = added_input_mask,
+                visual_embeds_att = encoded_img,
+                roi_embeds_att = encoded_roi,
+                roi_coors = roi_coors
+            )
+            pred = np.argmax(logits.detach().cpu(),axis = -1)
 
-        rs[ASPECT[id_asp]] = POLARITY[pred[0]]
+            rs[ASPECT[id_asp]] = POLARITY[pred[0]]
 
     logger.success("Done")
     logger.success(f'{rs}')
@@ -281,6 +331,12 @@ def fcmf_predict_wrapper(tokenizer, text, IMG_ASPECT, ASPECT, list_image_path, n
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    
+    parser.add_argument("--base_path_model",
+                    type=str,
+                    required=True,
+                    help="path for model checkpoint folder")
+    
     parser.add_argument("--text",
                     type=str,
                     required=True,
@@ -292,7 +348,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--num_images",
                         type=int,
-                        default = 7,
+                        default = 3,
                         required=False,
                         help="number of images")
 
@@ -315,7 +371,12 @@ if __name__ == "__main__":
                         help="Optional. Path to save prediction results to file")
 
     args = parser.parse_args()
-
+    BASE_PATH = args.base_path_model
+    YOLO_PATH = './checkpoints_yolo/yolov8m.pt'
+    WEIGHT_ROI_PATH = f'./{BASE_PATH}/seed_42_resroi_model_best.pth'
+    WEIGHT_IMAGE_PATH = f'./{BASE_PATH}/seed_42_resimg_model_best.pth'
+    FCMF_CHECKPOINT = f'./{BASE_PATH}/seed_42_fcmf_model_best.pth'
+    VISUAL_MODEL_CHECKPOINT = './4_visual_model.pth'
     num_rois = args.num_rois
     num_imgs = args.num_images
     list_image_path = args.image_list
