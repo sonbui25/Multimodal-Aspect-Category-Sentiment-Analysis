@@ -416,177 +416,177 @@ def main():
                 save_model(f'{args.output_dir}/seed_{args.seed}_resroi_model_last.pth', resnet_roi, optimizer, scheduler, epoch, scaler=scaler)
                 logger.info("Model checkpoint saved!\n")
 
-    # --- 6. TEST (WITH BEAM SEARCH & FULL ROUGE) ---
-    if args.do_eval and master_process:
-        try:
-            test_data = pd.read_json(f'{args.pretrained_data_dir}/test_with_iaog.json')
-            test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
-            test_loader = DataLoader(IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder), batch_size=args.eval_batch_size)
-        except: return
+    # # --- 6. TEST (WITH BEAM SEARCH & FULL ROUGE) ---
+    # if args.do_eval and master_process:
+    #     try:
+    #         test_data = pd.read_json(f'{args.pretrained_data_dir}/test_with_iaog.json')
+    #         test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+    #         test_loader = DataLoader(IAOGDataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder), batch_size=args.eval_batch_size)
+    #     except: return
 
-        ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
-        if os.path.exists(ckpt_path):
-            logger.info(f"Loading Best Checkpoint for Testing: {ckpt_path}")
-            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-            if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
-            else: model.load_state_dict(ckpt['model_state_dict'])
+    #     ckpt_path = f'{args.output_dir}/seed_{args.seed}_iaog_model_best.pth'
+    #     if os.path.exists(ckpt_path):
+    #         logger.info(f"Loading Best Checkpoint for Testing: {ckpt_path}")
+    #         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    #         if isinstance(model, DDP): model.module.load_state_dict(ckpt['model_state_dict'])
+    #         else: model.load_state_dict(ckpt['model_state_dict'])
             
-            # Load ResNet (Giữ nguyên logic load)
-            resimg_path = ckpt_path.replace("iaog_model", "resimg_model")
-            if os.path.exists(resimg_path):
-                unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
-                unwrap_resimg.load_state_dict(torch.load(resimg_path, map_location=device, weights_only=False)['model_state_dict'])
+    #         # Load ResNet (Giữ nguyên logic load)
+    #         resimg_path = ckpt_path.replace("iaog_model", "resimg_model")
+    #         if os.path.exists(resimg_path):
+    #             unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
+    #             unwrap_resimg.load_state_dict(torch.load(resimg_path, map_location=device, weights_only=False)['model_state_dict'])
             
-            resroi_path = ckpt_path.replace("iaog_model", "resroi_model")
-            if os.path.exists(resroi_path):
-                unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
-                unwrap_resroi.load_state_dict(torch.load(resroi_path, map_location=device, weights_only=False)['model_state_dict'])
+    #         resroi_path = ckpt_path.replace("iaog_model", "resroi_model")
+    #         if os.path.exists(resroi_path):
+    #             unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
+    #             unwrap_resroi.load_state_dict(torch.load(resroi_path, map_location=device, weights_only=False)['model_state_dict'])
                 
-            model.eval(); resnet_img.eval(); resnet_roi.eval()
+    #         model.eval(); resnet_img.eval(); resnet_roi.eval()
                 
-        all_test_results = []
+    #     all_test_results = []
         
-        # Storage for BERTScore
-        test_preds = {asp: [] for asp in ASPECT_LIST}
-        test_refs = {asp: [] for asp in ASPECT_LIST}
+    #     # Storage for BERTScore
+    #     test_preds = {asp: [] for asp in ASPECT_LIST}
+    #     test_refs = {asp: [] for asp in ASPECT_LIST}
         
-        temp_results_by_text = {} 
+    #     temp_results_by_text = {} 
 
-        with torch.no_grad():
-            for batch in tqdm(test_loader, desc="Test with Beam Search"):
-                batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
+    #     with torch.no_grad():
+    #         for batch in tqdm(test_loader, desc="Test with Beam Search"):
+    #             batch = tuple(t.to(device) if torch.is_tensor(t) else t for t in batch)
                 
-                # Unpack và lấy đủ 11 phần tử
-                (t_img_f, roi_img_f, roi_coors, 
-                 all_dec_lbls, dec_input_ids,  # Đổi tên labels -> all_dec_lbls
-                 all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
-                 batch_aspect_names, batch_texts) = batch # Lấy aspect name và text
+    #             # Unpack và lấy đủ 11 phần tử
+    #             (t_img_f, roi_img_f, roi_coors, 
+    #              all_dec_lbls, dec_input_ids,  # Đổi tên labels -> all_dec_lbls
+    #              all_enc_ids, all_enc_type, all_enc_mask, all_add_mask, 
+    #              batch_aspect_names, batch_texts) = batch # Lấy aspect name và text
 
-                # Feature Extraction
-                enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
-                vis_embeds = torch.stack(enc_imgs, dim=1)
-                enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
-                roi_embeds = torch.stack(enc_rois, dim=1)
+    #             # Feature Extraction
+    #             enc_imgs = [resnet_img(t_img_f[:,i]).view(-1,2048,49).permute(0,2,1) for i in range(args.num_imgs)]
+    #             vis_embeds = torch.stack(enc_imgs, dim=1)
+    #             enc_rois = [torch.stack([resnet_roi(roi_img_f[:,i,r]).squeeze(1) for r in range(args.num_rois)], dim=1) for i in range(args.num_imgs)]
+    #             roi_embeds = torch.stack(enc_rois, dim=1)
 
-                batch_size = all_enc_ids.shape[0]
+    #             batch_size = all_enc_ids.shape[0]
                 
-                # Loop qua Batch Size
-                for i in range(batch_size):
-                    # Lấy thông tin của mẫu hiện tại
-                    aspect_name = batch_aspect_names[i]
-                    text_content = batch_texts[i]
+    #             # Loop qua Batch Size
+    #             for i in range(batch_size):
+    #                 # Lấy thông tin của mẫu hiện tại
+    #                 aspect_name = batch_aspect_names[i]
+    #                 text_content = batch_texts[i]
                     
-                    # Beam Search cho mẫu i
-                    pred_text = beam_search(
-                        model=model,
-                        tokenizer=tokenizer,
-                        enc_ids=all_enc_ids[i],     # [Seq_Len] (đã flatten)
-                        enc_mask=all_enc_mask[i],
-                        enc_type=all_enc_type[i],
-                        add_mask=all_add_mask[i],
-                        vis_embeds=vis_embeds[i],
-                        roi_embeds=roi_embeds[i],
-                        roi_coors=roi_coors[i],
-                        beam_size=args.beam_size,
-                        max_len=args.max_len_decoder,
-                        device=device
-                    )[0]
+    #                 # Beam Search cho mẫu i
+    #                 pred_text = beam_search(
+    #                     model=model,
+    #                     tokenizer=tokenizer,
+    #                     enc_ids=all_enc_ids[i],     # [Seq_Len] (đã flatten)
+    #                     enc_mask=all_enc_mask[i],
+    #                     enc_type=all_enc_type[i],
+    #                     add_mask=all_add_mask[i],
+    #                     vis_embeds=vis_embeds[i],
+    #                     roi_embeds=roi_embeds[i],
+    #                     roi_coors=roi_coors[i],
+    #                     beam_size=args.beam_size,
+    #                     max_len=args.max_len_decoder,
+    #                     device=device
+    #                 )[0]
                     
-                    # Decode Label cho mẫu i
-                    lbl = all_dec_lbls[i].cpu().numpy()
-                    lbl = lbl[lbl != -100] # Bỏ padding
-                    label_text = tokenizer.decode(lbl, skip_special_tokens=True)
+    #                 # Decode Label cho mẫu i
+    #                 lbl = all_dec_lbls[i].cpu().numpy()
+    #                 lbl = lbl[lbl != -100] # Bỏ padding
+    #                 label_text = tokenizer.decode(lbl, skip_special_tokens=True)
 
-                    # Xử lý string
-                    if pred_text.startswith("n ") and len(pred_text) > 2: pred_text = pred_text[2:]
+    #                 # Xử lý string
+    #                 if pred_text.startswith("n ") and len(pred_text) > 2: pred_text = pred_text[2:]
                     
-                    # 1. Lưu vào list để tính Metrics
-                    test_preds[aspect_name].append(pred_text)
-                    test_refs[aspect_name].append(label_text)
+    #                 # 1. Lưu vào list để tính Metrics
+    #                 test_preds[aspect_name].append(pred_text)
+    #                 test_refs[aspect_name].append(label_text)
                     
-                    # 2. Gom nhóm theo câu để chuẩn bị Logging
-                    if text_content not in temp_results_by_text:
-                        temp_results_by_text[text_content] = {'text': text_content, 'aspects': {}}
+    #                 # 2. Gom nhóm theo câu để chuẩn bị Logging
+    #                 if text_content not in temp_results_by_text:
+    #                     temp_results_by_text[text_content] = {'text': text_content, 'aspects': {}}
                     
-                    temp_results_by_text[text_content]['aspects'][aspect_name] = {
-                        "predict": pred_text, 
-                        "label": label_text
-                    }
+    #                 temp_results_by_text[text_content]['aspects'][aspect_name] = {
+    #                     "predict": pred_text, 
+    #                     "label": label_text
+    #                 }
 
-        # Chuyển đổi từ dict sang list cho format cũ
-        all_test_results = list(temp_results_by_text.values())
+    #     # Chuyển đổi từ dict sang list cho format cũ
+    #     all_test_results = list(temp_results_by_text.values())
 
-        logger.info(f"Computing BERTScore for Test Set using model: {args.bert_score_model} ...")
+    #     logger.info(f"Computing BERTScore for Test Set using model: {args.bert_score_model} ...")
         
-        log_path = f"{args.output_dir}/iaog_test_predictions_formatted.txt"
-        with open(log_path, "w", encoding="utf-8") as f:
-            # --- PHẦN 1: METRICS ---
-            f.write(f"TEST METRICS (BERTScore with {args.bert_score_model}):\n")
-            f.write("-" * 50 + "\n")
+    #     log_path = f"{args.output_dir}/iaog_test_predictions_formatted.txt"
+    #     with open(log_path, "w", encoding="utf-8") as f:
+    #         # --- PHẦN 1: METRICS ---
+    #         f.write(f"TEST METRICS (BERTScore with {args.bert_score_model}):\n")
+    #         f.write("-" * 50 + "\n")
             
-            test_total_P = 0; test_total_R = 0; test_total_F1 = 0
-            count_valid = 0 
+    #         test_total_P = 0; test_total_R = 0; test_total_F1 = 0
+    #         count_valid = 0 
             
-            for asp in ASPECT_LIST:
-                if len(test_preds[asp]) > 0:
-                    P, R, F1 = score(test_preds[asp], test_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
+    #         for asp in ASPECT_LIST:
+    #             if len(test_preds[asp]) > 0:
+    #                 P, R, F1 = score(test_preds[asp], test_refs[asp], lang='vi', model_type=args.bert_score_model, verbose=False, device=device, num_layers=12)
                     
-                    asp_P = P.mean().item(); asp_R = R.mean().item(); asp_F1 = F1.mean().item()
-                    test_total_P += asp_P; test_total_R += asp_R; test_total_F1 += asp_F1
-                    count_valid += 1
+    #                 asp_P = P.mean().item(); asp_R = R.mean().item(); asp_F1 = F1.mean().item()
+    #                 test_total_P += asp_P; test_total_R += asp_R; test_total_F1 += asp_F1
+    #                 count_valid += 1
                     
-                    line = f"{asp:<15} | P: {asp_P:.4f} | R: {asp_R:.4f} | F1: {asp_F1:.4f}\n"
-                    logger.info(line.strip())
-                    f.write(line)
-                else:
-                    f.write(f"{asp:<15} | (No positive samples)\n")
+    #                 line = f"{asp:<15} | P: {asp_P:.4f} | R: {asp_R:.4f} | F1: {asp_F1:.4f}\n"
+    #                 logger.info(line.strip())
+    #                 f.write(line)
+    #             else:
+    #                 f.write(f"{asp:<15} | (No positive samples)\n")
             
-            if count_valid > 0:
-                avg_rP = test_total_P / count_valid
-                avg_rR = test_total_R / count_valid
-                avg_rF1 = test_total_F1 / count_valid
-            else:
-                avg_rP = avg_rR = avg_rF1 = 0.0
+    #         if count_valid > 0:
+    #             avg_rP = test_total_P / count_valid
+    #             avg_rR = test_total_R / count_valid
+    #             avg_rF1 = test_total_F1 / count_valid
+    #         else:
+    #             avg_rP = avg_rR = avg_rF1 = 0.0
 
-            f.write("-" * 50 + "\n")
-            f.write(f"MACRO AVERAGE   | P: {avg_rP:.4f} | R: {avg_rR:.4f} | F1: {avg_rF1:.4f}\n")
-            f.write("="*50 + "\n\n")
+    #         f.write("-" * 50 + "\n")
+    #         f.write(f"MACRO AVERAGE   | P: {avg_rP:.4f} | R: {avg_rR:.4f} | F1: {avg_rF1:.4f}\n")
+    #         f.write("="*50 + "\n\n")
             
-            # --- PHẦN 2: DETAILED LOGS ---
-            f.write("DETAILED PREDICTIONS (Filtered View):\n")
+    #         # --- PHẦN 2: DETAILED LOGS ---
+    #         f.write("DETAILED PREDICTIONS (Filtered View):\n")
             
-            for i, sample in enumerate(all_test_results):
-                sample_buffer = []
-                has_content = False
+    #         for i, sample in enumerate(all_test_results):
+    #             sample_buffer = []
+    #             has_content = False
                 
-                header = f"Sentence {i}: {sample['text']}\n"
+    #             header = f"Sentence {i}: {sample['text']}\n"
                 
-                for asp in ASPECT_LIST:
-                    res = sample['aspects'].get(asp, {'predict': 'none', 'label': 'none'})
-                    pred = str(res['predict']).strip()
-                    label = str(res['label']).strip()
+    #             for asp in ASPECT_LIST:
+    #                 res = sample['aspects'].get(asp, {'predict': 'none', 'label': 'none'})
+    #                 pred = str(res['predict']).strip()
+    #                 label = str(res['label']).strip()
                     
-                    # LOGIC LỌC: Ẩn nếu CẢ hai nếu nhãn và dự đoán đều là 'none' hoặc rỗng
-                    is_pred_none = (pred.lower() == 'none' or pred == '')
-                    is_label_none = (label.lower() == 'none' or label == '')
+    #                 # LOGIC LỌC: Ẩn nếu CẢ hai nếu nhãn và dự đoán đều là 'none' hoặc rỗng
+    #                 is_pred_none = (pred.lower() == 'none' or pred == '')
+    #                 is_label_none = (label.lower() == 'none' or label == '')
                     
-                    if not (is_pred_none and is_label_none):
-                        sample_buffer.append(f"{asp}:\n")
-                        sample_buffer.append(f"   predict: {pred}\n")
-                        sample_buffer.append(f"   label:   {label}\n")
-                        has_content = True
+    #                 if not (is_pred_none and is_label_none):
+    #                     sample_buffer.append(f"{asp}:\n")
+    #                     sample_buffer.append(f"   predict: {pred}\n")
+    #                     sample_buffer.append(f"   label:   {label}\n")
+    #                     has_content = True
                 
-                if has_content:
-                    f.write("{\n")
-                    f.write(header)
-                    for line in sample_buffer: f.write(line)
-                    f.write("}\n")
+    #             if has_content:
+    #                 f.write("{\n")
+    #                 f.write(header)
+    #                 for line in sample_buffer: f.write(line)
+    #                 f.write("}\n")
         
-        logger.info(f"***** TEST RESULTS (Macro Avg) *****")
-        logger.info(f"Test Precision: {avg_rP:.4f}") 
-        logger.info(f"Test Recall:    {avg_rR:.4f}") 
-        logger.info(f"Test F1-Score:  {avg_rF1:.4f}") 
-        logger.info(f"Formatted predictions saved to {log_path}")
+    #     logger.info(f"***** TEST RESULTS (Macro Avg) *****")
+    #     logger.info(f"Test Precision: {avg_rP:.4f}") 
+    #     logger.info(f"Test Recall:    {avg_rR:.4f}") 
+    #     logger.info(f"Test F1-Score:  {avg_rF1:.4f}") 
+    #     logger.info(f"Formatted predictions saved to {log_path}")
 
 if __name__ == '__main__':
     main()
