@@ -201,8 +201,8 @@ def main():
         train_data = pd.read_json(f'{args.data_dir}/train.json')
         dev_data = pd.read_json(f'{args.data_dir}/dev.json')
         
-        # train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
-        # dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+        train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+        dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
 
         if ddp_world_size > 1:
             num_splitted_train = train_data.shape[0] // ddp_world_size
@@ -567,7 +567,7 @@ def main():
         logger.info("\n\n===================== STARTING TEST EVALUATION =====================")
         
         test_data = pd.read_json(f'{args.data_dir}/test.json')
-        # test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
+        test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         test_dataset = MACSADataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
 
