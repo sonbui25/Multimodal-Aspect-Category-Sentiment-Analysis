@@ -6,6 +6,8 @@ data/
 #Model
 checkpoints/*.pth
 *.pth
+# Ignore important model files
+best*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

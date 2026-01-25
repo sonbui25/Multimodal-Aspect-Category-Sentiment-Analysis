@@ -14,7 +14,7 @@ import numpy as np
 import math
 import torch.nn.functional as F
 from transformers import AutoModel
-from fcmf_framework.fcmf_modeling import FCMF
+from fcmf_framework.fcmf_multimodal import FCMF
 from text_preprocess import *
 from fcmf_framework.image_process import *
 import argparse
@@ -88,12 +88,15 @@ def load_fcmf_model(fcmf_checkpoint,visual_checkpoint, pretrained_model, num_img
     fcmf_model.load_state_dict(fcmf_checkpoint['model_state_dict'])
     
     try:
-        visual_checkpoint = load_model(visual_checkpoint)
-    except:
-        logger.error("Wrong visual weight path!!!")
-        raise ValueError("Wrong visual weight path!!!")
-    
-    visual_model.load_state_dict(visual_checkpoint['model_state_dict'])
+        visual_checkpoint_data = load_model(visual_checkpoint)
+        visual_model.load_state_dict(visual_checkpoint_data['model_state_dict'])
+        logger.info(f"Loaded visual model from: {visual_checkpoint}")
+    except FileNotFoundError:
+        logger.warning(f"Visual model checkpoint not found: {visual_checkpoint}")
+        logger.warning("Using ResNet152 with pretrained ImageNet weights instead")
+    except Exception as e:
+        logger.warning(f"Could not load visual model checkpoint: {e}")
+        logger.warning("Using ResNet152 with pretrained ImageNet weights instead")
     
     return fcmf_model, visual_model
 
