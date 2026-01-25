@@ -17,7 +17,7 @@ DROP_ROI_LIST = ["mortor", "car", "fork", "spoon", "knife", "cow", "bus", "cell 
            "tennis racket", "dinning table", "airplane", "keyboard", "mouse", 
            "skateboard", "dining table", "sheep", "teddy bear", "zebra", "kite", "bear",'vase','tv']
 
-with open("./yolov8m.yaml", "r") as stream:
+with open("./checkpoints_yolo/yolov8m.yaml", "r") as stream:
     try:
         yolo_yaml = yaml.safe_load(stream)
     except:

@@ -4,7 +4,7 @@ kaggle/
 data/
 
 #Model
-checkpoints/*.pth
+checkpoints*
 *.pth
 # Ignore important model files
 best*
