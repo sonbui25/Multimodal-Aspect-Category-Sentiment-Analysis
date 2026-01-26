@@ -30,7 +30,7 @@ def set_seed(seed=42):
     np.random.seed(seed)
 
 # Call this at startup
-set_seed(37)
+set_seed(42) # or 37
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 ASPECT = ['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area']
@@ -348,7 +348,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--num_images",
                         type=int,
-                        default = 3,
+                        default = 7,
                         required=False,
                         help="number of images")
 
