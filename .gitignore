@@ -3,6 +3,10 @@ kaggle/
 #data
 data/
 
+# Ignore các file có chứa từ khóa custom
+*custom*
+# Ignore các file có chứa từ khóa visualize
+*visualize*
 #Model
 checkpoints*
 *.pth
