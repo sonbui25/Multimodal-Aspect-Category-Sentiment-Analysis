@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import math
 from text_preprocess import *
 from iaog_dataset import IAOGDataset 
-from fcmf_framework.fcmf_pretraining import FCMFSeq2Seq, beam_search
+from fcmf_framework.fcmf_pretraining import FCMFSeq2Seq
 import argparse
 import logging
 import random
