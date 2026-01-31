@@ -442,7 +442,16 @@ class FeatureExtractor(torch.nn.Module):
             attention_mask=attention_mask,
             output_attentions=True
         )
-        # outputs có thể là tuple hoặc ModelOutput object
+        # Debug: in ra kiểu và các trường có trong outputs
+        print("Type of outputs:", type(outputs))
+        if isinstance(outputs, tuple):
+            print("Tuple length:", len(outputs))
+        elif hasattr(outputs, "keys"):
+            print("Output keys:", outputs.keys())
+        else:
+            print("Output dir:", dir(outputs))
+
+        # Lấy ra 3 giá trị một cách an toàn
         if isinstance(outputs, tuple):
             seq_out = outputs[0]
             pooled_out = outputs[1] if len(outputs) > 1 else None
