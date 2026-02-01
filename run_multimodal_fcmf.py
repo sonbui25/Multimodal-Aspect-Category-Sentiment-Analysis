@@ -581,7 +581,7 @@ def main():
             if isinstance(model, (DDP, torch.nn.DataParallel)):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
             else:
-                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                model.load_state_dict(checkpoint['model_state_dict'])
             
             # Load ResNets
             rimg_path = best_path.replace("fcmf", "resimg")
