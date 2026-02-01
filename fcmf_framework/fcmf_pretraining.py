@@ -11,6 +11,145 @@ import torch
 import torch.nn.functional as F
 import math
 
+# ==============================================================================
+# HÀM BEAM SEARCH CHUẨN (Dựa trên Dive into Deep Learning 10.8)
+# ==============================================================================
+def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask, 
+                vis_embeds, roi_embeds, roi_coors, 
+                beam_size=3, num_preds=1, max_len=20, device='cuda'):
+    """
+    Thực hiện Beam Search tối ưu cho FCMFSeq2Seq.
+    """
+    model.eval()
+    
+    # 1. Chuẩn bị Batch Dimension (nếu input là 1 sample)
+    if enc_ids.dim() == 1:
+        enc_ids = enc_ids.unsqueeze(0)
+        enc_mask = enc_mask.unsqueeze(0)
+        enc_type = enc_type.unsqueeze(0)
+        add_mask = add_mask.unsqueeze(0)
+        vis_embeds = vis_embeds.unsqueeze(0)
+        roi_embeds = roi_embeds.unsqueeze(0)
+        roi_coors = roi_coors.unsqueeze(0)
+
+    # 2. CHẠY ENCODER MỘT LẦN DUY NHẤT (Encoder Caching)
+    # Thay vì gọi model() lặp lại, ta chỉ encoding 1 lần.
+    with torch.no_grad():
+        # Unpack tuple chỉ lấy hidden states (bỏ qua attentions ở vị trí thứ 2)
+        encoder_results = model.encoder(
+            enc_ids, 
+            vis_embeds, 
+            roi_embeds, 
+            roi_coors, 
+            enc_type, 
+            enc_mask, 
+            add_mask
+        )
+        
+        # Kiểm tra nếu kết quả là tuple (do code mới trả về thêm attention)
+        if isinstance(encoder_results, tuple):
+            enc_outputs = encoder_results[0]
+        else:
+            enc_outputs = encoder_results
+    
+    # 3. Khởi tạo Beam
+    start_token_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.cls_token_id 
+
+    # Tạo decoder input ban đầu
+    decoder_input = torch.tensor([[start_token_id]], device=device, dtype=torch.long)
+    
+    # Khởi tạo state cho decoder (KV cache)
+    # Lưu ý: Hàm init_state cần enc_outputs và valid_lens (ở đây valid_lens=None khi eval)
+    state = model.decoder.init_state(enc_outputs, None)
+
+    # Beam chứa: (score, sequence, state)
+    # Score là log-likelihood (bắt đầu bằng 0)
+    beams = [(0.0, decoder_input, state)]
+    
+    final_candidates = []
+
+    for step in range(max_len):
+        candidates = []
+        
+        # Duyệt qua các beam hiện tại
+        for score, seq, current_state in beams:
+            # Kiểm tra nếu đã kết thúc (gặp SEP)
+            if seq[0, -1].item() == tokenizer.sep_token_id:
+                final_candidates.append((score, seq))
+                continue
+            
+            # CHỈ ĐƯA VÀO TOKEN CUỐI CÙNG để tận dụng KV Cache (incremental decoding)
+            # Nếu model.decoder hỗ trợ state update đúng cách.
+            # Tuy nhiên, code IAOGDecoder của  ghép chuỗi trong state: 
+            # key_values = torch.cat((state[2][self.i], X), dim=1)
+            # Nên ta chỉ cần đưa token mới nhất vào (dec_input_step).
+            
+            dec_input_step = seq[:, -1:] # Lấy token cuối cùng [1, 1]
+
+            with torch.no_grad():
+                # Gọi trực tiếp Decoder
+                # Lưu ý: Cần deepcopy state nếu state là list mutable để tránh ảnh hưởng các beam khác
+                # Nhưng PyTorch tensor trong list thì cần cẩn thận.
+                # Để đơn giản và an toàn bộ nhớ, ta clone state cho mỗi candidate.
+                
+                # Copy state cho nhánh beam này (vì mỗi beam có lịch sử KV cache riêng)
+                # State structure: [enc_outputs, enc_valid_lens, [layer_kv_cache...]]
+                # Layer cache là List các Tensor.
+                state_copy = [
+                    current_state[0], # enc_outputs (share chung, ko cần copy deep)
+                    current_state[1], # valid_lens
+                    [layer_cache.clone() if layer_cache is not None else None for layer_cache in current_state[2]]
+                ]
+                
+                # Forward Decoder
+                # dec_input_step là token vừa sinh ra
+                logits = model.decoder(dec_input_step, state_copy, is_train=False)
+                # Logits shape: [Batch, 1, Vocab] -> lấy token cuối
+                next_token_logits = logits[0, -1, :]
+                
+                log_probs = F.log_softmax(next_token_logits, dim=-1)
+                
+                # Lấy Top-K
+                top_k_scores, top_k_ids = torch.topk(log_probs, beam_size)
+                
+                for k in range(beam_size):
+                    new_score = score + top_k_scores[k].item()
+                    new_token = top_k_ids[k].view(1, 1)
+                    new_seq = torch.cat([seq, new_token], dim=1)
+                    
+                    # Lưu candidate gồm: score, chuỗi mới, và state mới (đã update sau forward)
+                    candidates.append((new_score, new_seq, state_copy))
+        
+        # Pruning: Chọn top beam_size ứng viên tốt nhất
+        if not candidates:
+            break
+            
+        # Sắp xếp giảm dần theo score
+        ordered = sorted(candidates, key=lambda x: x[0], reverse=True)
+        
+        # Vì state_copy trong loop trên có thể bị reference chéo nếu implement không kỹ
+        # ở đây mỗi candidate đã giữ state_copy riêng sau khi forward, nên an toàn.
+        beams = ordered[:beam_size]
+        
+        # Early stopping nếu tất cả beams đều đã xong
+        if all(seq[0, -1].item() == tokenizer.sep_token_id for _, seq, _ in beams):
+            final_candidates.extend([(s, seq) for s, seq, _ in beams])
+            break
+    
+    # Nếu chưa có candidate nào hoàn thành (vẫn đang chạy đến max_len)
+    if len(final_candidates) == 0:
+         final_candidates = [(s, seq) for s, seq, _ in beams]
+
+    # Chọn câu tốt nhất
+    best_score, best_seq = sorted(final_candidates, key=lambda x: x[0], reverse=True)[0]
+    
+    pred_text = tokenizer.decode(best_seq[0], skip_special_tokens=True)
+    
+    # Clean text (nếu có lỗi tokenizer sinh ra khoảng trắng thừa)
+    pred_text = pred_text.strip()
+    
+    return [pred_text]
+
 class FCMFEncoder(nn.Module):
     def __init__(self, pretrained_hf_path, num_imgs=7, num_roi=4, alpha=0.7):
         super(FCMFEncoder, self).__init__()
@@ -139,86 +278,6 @@ class FCMFEncoder(nn.Module):
         final_multimodal_encoder = self.mm_attention(fusion, extended_attention_mask)
         final_multimodal_encoder = final_multimodal_encoder[-1] 
         return final_multimodal_encoder, enc_attentions
-
-class FCMFSeq2Seq(nn.Module):
-    def __init__(self, vocab_size, max_len_decoder, pretrained_hf_path, num_imgs, num_roi, alpha):
-        super(FCMFSeq2Seq, self).__init__()
-        self.encoder = FCMFEncoder(pretrained_hf_path, num_imgs=num_imgs, num_roi=num_roi, alpha=alpha)
-        self.decoder = IAOGDecoder(vocab_size=vocab_size)
-        self.num_imgs = num_imgs
-        # --- Weight Initialization ---
-        self.decoder.apply(self._init_weights)
-        self.encoder.vismap2text.apply(self._init_weights)
-        self.encoder.roimap2text.apply(self._init_weights)
-        self.encoder.box_head.apply(self._init_weights)
-        self.encoder.text2img_attention.apply(self._init_weights)
-        self.encoder.mm_attention.apply(self._init_weights)
-        # self.encoder.MultimodalDenoisingEncoder.apply(self._init_weights)
-        
-        # 1. Ép BERT về đúng vocab_size (khớp với tokenizer)
-        if hasattr(self.encoder.bert.cell, 'resize_token_embeddings'):
-            self.encoder.bert.cell.resize_token_embeddings(vocab_size)
-
-        # 2. Bây giờ thực hiện Weight Tying vì Decoder và Encoder dùng chung vocab
-        if hasattr(self.encoder.bert.cell, 'embeddings'):
-            self.decoder.embedding.weight = self.encoder.bert.cell.embeddings.word_embeddings.weight
-
-        self.decoder.dense.weight = self.decoder.embedding.weight
-
-    def forward(self, enc_X, dec_X, visual_embeds_att, roi_embeds_att, roi_coors=None, token_type_ids=None, attention_mask=None, added_attention_mask=None, source_valid_len=None, is_train=True):
-        enc_output, enc_attentions = self.encoder(
-            enc_X, 
-            visual_embeds_att, 
-            roi_embeds_att, 
-            roi_coors, 
-            token_type_ids, 
-            attention_mask, 
-            added_attention_mask
-        )
-        
-        # 2. Tái tạo Mask Động để truyền cho Decoder
-        # Vì Decoder cần biết trong enc_output chỗ nào là Text Padding
-        
-        # Lấy lại độ dài text thực tế từ output của encoder
-        # Tổng length - 14 (Visual) = Text Length
-        num_visual_tokens = self.num_imgs * 2
-        current_text_len = enc_output.size(1) - num_visual_tokens
-        
-        # Lấy mask gốc từ input
-        text_mask = attention_mask[:, :current_text_len] # [Batch, seq_len]
-        
-        # Tạo mask visual
-        vis_mask = torch.ones((text_mask.size(0), num_visual_tokens), 
-                              device=text_mask.device, dtype=text_mask.dtype)
-        
-        # Combined Mask: [Batch, seq_len + 14]
-        combined_mask = torch.cat((text_mask, vis_mask), dim=1)
-
-        # Tạo state đủ 3 thành phần: [Encoder_Out, Mask, Cache_List]
-        # Cache_List cần thiết cho TransformerDecoderBlock (state[2])
-        dec_state = [enc_output, combined_mask, [None] * self.decoder.num_blks]
-
-        # 3. Gọi Decoder với state đã chuẩn bị
-        logits = self.decoder(dec_X, 
-                              dec_state, 
-                              is_train=is_train)
-        if not is_train:
-            return logits, enc_attentions
-        return logits
-
-    def _init_weights(self, module):
-        """Initialize weights with Normal distribution (std=0.02)"""
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=0.02)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=0.02)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
 '''
 class FCMFEncoder(nn.Module):
     def __init__(self, pretrained_hf_path, num_imgs=7, num_roi=4, alpha=0.7):
@@ -374,146 +433,82 @@ class FCMFEncoder(nn.Module):
         # in ra kich thuoc cua final_multimodal_encoder
         return final_multimodal_encoder[-1], enc_attentions
 '''
+class FCMFSeq2Seq(nn.Module):
+    def __init__(self, vocab_size, max_len_decoder, pretrained_hf_path, num_imgs, num_roi, alpha):
+        super(FCMFSeq2Seq, self).__init__()
+        self.encoder = FCMFEncoder(pretrained_hf_path, num_imgs=num_imgs, num_roi=num_roi, alpha=alpha)
+        self.decoder = IAOGDecoder(vocab_size=vocab_size)
+        self.num_imgs = num_imgs
+        # --- Weight Initialization ---
+        self.decoder.apply(self._init_weights)
+        self.encoder.vismap2text.apply(self._init_weights)
+        self.encoder.roimap2text.apply(self._init_weights)
+        self.encoder.box_head.apply(self._init_weights)
+        self.encoder.text2img_attention.apply(self._init_weights)
+        self.encoder.mm_attention.apply(self._init_weights)
+        # self.encoder.MultimodalDenoisingEncoder.apply(self._init_weights)
+        
+        # 1. Ép BERT về đúng 15002 (khớp với tokenizer)
+        if hasattr(self.encoder.bert.cell, 'resize_token_embeddings'):
+            self.encoder.bert.cell.resize_token_embeddings(vocab_size) # vocab_size = 15002
 
+        # 2. Bây giờ thực hiện Weight Tying sẽ an toàn vì BERT đã là 15002
+        if hasattr(self.encoder.bert.cell, 'embeddings'):
+            self.decoder.embedding.weight = self.encoder.bert.cell.embeddings.word_embeddings.weight
 
-'''
-# ==============================================================================
-# HÀM BEAM SEARCH CHUẨN (Dựa trên Dive into Deep Learning 10.8)
-# ==============================================================================
-def beam_search(model, tokenizer, enc_ids, enc_mask, enc_type, add_mask, 
-                vis_embeds, roi_embeds, roi_coors, 
-                beam_size=3, num_preds=1, max_len=20, device='cuda'):
-    """
-    Thực hiện Beam Search tối ưu cho FCMFSeq2Seq.
-    """
-    model.eval()
-    
-    # 1. Chuẩn bị Batch Dimension (nếu input là 1 sample)
-    if enc_ids.dim() == 1:
-        enc_ids = enc_ids.unsqueeze(0)
-        enc_mask = enc_mask.unsqueeze(0)
-        enc_type = enc_type.unsqueeze(0)
-        add_mask = add_mask.unsqueeze(0)
-        vis_embeds = vis_embeds.unsqueeze(0)
-        roi_embeds = roi_embeds.unsqueeze(0)
-        roi_coors = roi_coors.unsqueeze(0)
+        self.decoder.dense.weight = self.decoder.embedding.weight
 
-    # 2. CHẠY ENCODER MỘT LẦN DUY NHẤT (Encoder Caching)
-    # Thay vì gọi model() lặp lại, ta chỉ encoding 1 lần.
-    with torch.no_grad():
-        # Unpack tuple chỉ lấy hidden states (bỏ qua attentions ở vị trí thứ 2)
-        encoder_results = model.encoder(
-            enc_ids, 
-            vis_embeds, 
-            roi_embeds, 
+    def forward(self, enc_X, dec_X, visual_embeds_att, roi_embeds_att, roi_coors=None, token_type_ids=None, attention_mask=None, added_attention_mask=None, source_valid_len=None, is_train=True):
+        enc_output, enc_attentions = self.encoder(
+            enc_X, 
+            visual_embeds_att, 
+            roi_embeds_att, 
             roi_coors, 
-            enc_type, 
-            enc_mask, 
-            add_mask
+            token_type_ids, 
+            attention_mask, 
+            added_attention_mask
         )
         
-        # Kiểm tra nếu kết quả là tuple (do code mới trả về thêm attention)
-        if isinstance(encoder_results, tuple):
-            enc_outputs = encoder_results[0]
-        else:
-            enc_outputs = encoder_results
-    
-    # 3. Khởi tạo Beam
-    start_token_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.cls_token_id 
-
-    # Tạo decoder input ban đầu
-    decoder_input = torch.tensor([[start_token_id]], device=device, dtype=torch.long)
-    
-    # Khởi tạo state cho decoder (KV cache)
-    # Lưu ý: Hàm init_state cần enc_outputs và valid_lens (ở đây valid_lens=None khi eval)
-    state = model.decoder.init_state(enc_outputs, None)
-
-    # Beam chứa: (score, sequence, state)
-    # Score là log-likelihood (bắt đầu bằng 0)
-    beams = [(0.0, decoder_input, state)]
-    
-    final_candidates = []
-
-    for step in range(max_len):
-        candidates = []
+        # 2. Tái tạo Mask Động để truyền cho Decoder
+        # Vì Decoder cần biết trong enc_output chỗ nào là Text Padding
         
-        # Duyệt qua các beam hiện tại
-        for score, seq, current_state in beams:
-            # Kiểm tra nếu đã kết thúc (gặp SEP)
-            if seq[0, -1].item() == tokenizer.sep_token_id:
-                final_candidates.append((score, seq))
-                continue
-            
-            # CHỈ ĐƯA VÀO TOKEN CUỐI CÙNG để tận dụng KV Cache (incremental decoding)
-            # Nếu model.decoder hỗ trợ state update đúng cách.
-            # Tuy nhiên, code IAOGDecoder của  ghép chuỗi trong state: 
-            # key_values = torch.cat((state[2][self.i], X), dim=1)
-            # Nên ta chỉ cần đưa token mới nhất vào (dec_input_step).
-            
-            dec_input_step = seq[:, -1:] # Lấy token cuối cùng [1, 1]
-
-            with torch.no_grad():
-                # Gọi trực tiếp Decoder
-                # Lưu ý: Cần deepcopy state nếu state là list mutable để tránh ảnh hưởng các beam khác
-                # Nhưng PyTorch tensor trong list thì cần cẩn thận.
-                # Để đơn giản và an toàn bộ nhớ, ta clone state cho mỗi candidate.
-                
-                # Copy state cho nhánh beam này (vì mỗi beam có lịch sử KV cache riêng)
-                # State structure: [enc_outputs, enc_valid_lens, [layer_kv_cache...]]
-                # Layer cache là List các Tensor.
-                state_copy = [
-                    current_state[0], # enc_outputs (share chung, ko cần copy deep)
-                    current_state[1], # valid_lens
-                    [layer_cache.clone() if layer_cache is not None else None for layer_cache in current_state[2]]
-                ]
-                
-                # Forward Decoder
-                # dec_input_step là token vừa sinh ra
-                logits = model.decoder(dec_input_step, state_copy, is_train=False)
-                # Logits shape: [Batch, 1, Vocab] -> lấy token cuối
-                next_token_logits = logits[0, -1, :]
-                
-                log_probs = F.log_softmax(next_token_logits, dim=-1)
-                
-                # Lấy Top-K
-                top_k_scores, top_k_ids = torch.topk(log_probs, beam_size)
-                
-                for k in range(beam_size):
-                    new_score = score + top_k_scores[k].item()
-                    new_token = top_k_ids[k].view(1, 1)
-                    new_seq = torch.cat([seq, new_token], dim=1)
-                    
-                    # Lưu candidate gồm: score, chuỗi mới, và state mới (đã update sau forward)
-                    candidates.append((new_score, new_seq, state_copy))
+        # Lấy lại độ dài text thực tế từ output của encoder
+        # Tổng length - 14 (Visual) = Text Length
+        num_visual_tokens = self.num_imgs * 2 # Hoặc lấy động từ encoder nếu cấu trúc đổi
+        current_text_len = enc_output.size(1) - num_visual_tokens
         
-        # Pruning: Chọn top beam_size ứng viên tốt nhất
-        if not candidates:
-            break
-            
-        # Sắp xếp giảm dần theo score
-        ordered = sorted(candidates, key=lambda x: x[0], reverse=True)
+        # Lấy mask gốc từ input
+        text_mask = attention_mask[:, :current_text_len] # [Batch, seq_len]
         
-        # Vì state_copy trong loop trên có thể bị reference chéo nếu implement không kỹ
-        # ở đây mỗi candidate đã giữ state_copy riêng sau khi forward, nên an toàn.
-        beams = ordered[:beam_size]
+        # Tạo mask visual
+        vis_mask = torch.ones((text_mask.size(0), num_visual_tokens), 
+                              device=text_mask.device, dtype=text_mask.dtype)
         
-        # Early stopping nếu tất cả beams đều đã xong
-        if all(seq[0, -1].item() == tokenizer.sep_token_id for _, seq, _ in beams):
-            final_candidates.extend([(s, seq) for s, seq, _ in beams])
-            break
-    
-    # Nếu chưa có candidate nào hoàn thành (vẫn đang chạy đến max_len)
-    if len(final_candidates) == 0:
-         final_candidates = [(s, seq) for s, seq, _ in beams]
+        # Combined Mask: [Batch, seq_len + 14]
+        combined_mask = torch.cat((text_mask, vis_mask), dim=1)
 
-    # Chọn câu tốt nhất
-    best_score, best_seq = sorted(final_candidates, key=lambda x: x[0], reverse=True)[0]
-    
-    pred_text = tokenizer.decode(best_seq[0], skip_special_tokens=True)
-    
-    # Clean text (nếu có lỗi tokenizer sinh ra khoảng trắng thừa)
-    pred_text = pred_text.strip()
-    
-    return [pred_text]
+        # [FIX HERE] Tạo state đủ 3 thành phần: [Encoder_Out, Mask, Cache_List]
+        # Cache_List cần thiết cho TransformerDecoderBlock (state[2])
+        dec_state = [enc_output, combined_mask, [None] * self.decoder.num_blks]
 
-'''
+        # 3. Gọi Decoder với state đã sửa
+        logits = self.decoder(dec_X, 
+                              dec_state, 
+                              is_train=is_train)
+        if not is_train:
+            return logits, enc_attentions
+        return logits
+
+    def _init_weights(self, module):
+        """Initialize weights with Normal distribution (std=0.02)"""
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()

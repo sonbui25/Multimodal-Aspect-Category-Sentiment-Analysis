@@ -431,19 +431,18 @@ class BertPooler(nn.Module):
         return pooled_output
 
 class FeatureExtractor(torch.nn.Module): 
-    def __init__(self, pretrained_path):
-        super(FeatureExtractor,self).__init__()
-        self.cell = AutoModel.from_pretrained(pretrained_path,
-                                            local_files_only=True,
-                                            attn_implementation="eager")
+  def __init__(self, pretrained_path):
+    super(FeatureExtractor,self).__init__()
+    self.cell = AutoModel.from_pretrained(pretrained_path,
+                                          local_files_only=True)
 
-    def forward(self, input_ids, token_type_ids, attention_mask):
-        seq_out, pooled_out, enc_attentions = self.cell(input_ids = input_ids,
-                                        token_type_ids = token_type_ids, 
-                                        attention_mask = attention_mask,
-                                        output_attentions=True)[:3]
+  def forward(self, input_ids, token_type_ids, attention_mask):
+    seq_out, pooled_out, enc_attentions = self.cell(input_ids = input_ids,
+                                    token_type_ids = token_type_ids, 
+                                    attention_mask = attention_mask,
+                                    output_attentions=True)[:3]
 
-        return seq_out, pooled_out, enc_attentions
+    return seq_out, pooled_out, enc_attentions
 
 class MultimodalDenoisingEncoder(nn.Module):
     #Module lọc nhiễu ảnh
