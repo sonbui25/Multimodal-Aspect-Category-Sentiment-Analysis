@@ -83,7 +83,8 @@ def main():
     # Argument to resume training from a specific checkpoint
     parser.add_argument("--resume_from_checkpoint", default=None, type=str,
                         help="Path to the checkpoint .pth file to resume training from.")
-
+    parser.add_argument("--model_checkpoint", default=None, type=str,
+                        help="Path to the checkpoint .pth file to resume training from.")
     # --- HYPERPARAMETERS ---
     parser.add_argument("--list_aspect", default=['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area'],
                         nargs='+', help = "List of predefined Aspect.")
@@ -570,9 +571,10 @@ def main():
         test_data['comment'] = test_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         test_dataset = MACSADataset(test_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois)
         test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=args.eval_batch_size)
-
-        best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
-        # best_path = f'/kaggle/input/best-viim-fcmf-0-7018/pytorch/default/1/seed_42_fcmf_model_best.pth'
+        if os.path.exists(args.model_checkpoint):
+            best_path = args.model_checkpoint
+        else:
+            best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
             checkpoint = torch.load(best_path, map_location=device, weights_only=False)
