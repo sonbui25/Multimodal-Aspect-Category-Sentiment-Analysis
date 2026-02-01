@@ -588,13 +588,13 @@ def main():
             if os.path.exists(rimg_path):
                 rimg_ckpt = torch.load(rimg_path, map_location=device)
                 unwrap_rimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
-                unwrap_rimg.load_state_dict(rimg_ckpt['model_state_dict'])
+                unwrap_rimg.load_state_dict(rimg_ckpt['model_state_dict'], strict=False)
                 
             rroi_path = best_path.replace("fcmf", "resroi")
             if os.path.exists(rroi_path):
                 rroi_ckpt = torch.load(rroi_path, map_location=device)
                 unwrap_rroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
-                unwrap_rroi.load_state_dict(rroi_ckpt['model_state_dict'])
+                unwrap_rroi.load_state_dict(rroi_ckpt['model_state_dict'], strict=False)
         else:
             logger.warning("No best model found! Using current weights.")
 
