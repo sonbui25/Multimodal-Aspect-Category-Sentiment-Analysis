@@ -438,10 +438,31 @@ class FeatureExtractor(torch.nn.Module):
                                           attn_implementation="eager")
 
   def forward(self, input_ids, token_type_ids, attention_mask):
-    seq_out, pooled_out, enc_attentions = self.cell(input_ids = input_ids,
-                                    token_type_ids = token_type_ids, 
-                                    attention_mask = attention_mask,
-                                    output_attentions=True)[:3]
+    outputs = self.cell(
+        input_ids=input_ids,
+        token_type_ids=token_type_ids, 
+        attention_mask=attention_mask,
+        output_attentions=True,
+        return_dict=True # Ép trả về Dict/Object để dễ kiểm soát
+    )
+
+    # 1. Lấy Sequence Output (Luôn có)
+    seq_out = outputs.last_hidden_state
+
+    # 2. Lấy Pooler Output (Cần kiểm tra kỹ)
+    if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+        pooled_out = outputs.pooler_output
+    else:
+        # Nếu không có pooler sẵn (ví dụ RoBERTa base), ta lấy CLS token thủ công
+        # Token đầu tiên [CLS] là seq_out[:, 0, :]
+        pooled_out = seq_out[:, 0, :] 
+
+    # 3. Lấy Attentions (Quan trọng cho Fusion)
+    enc_attentions = outputs.attentions
+    
+    # Kiểm tra an toàn: Nếu mất attentions là mô hình phế ngay
+    if enc_attentions is None:
+        raise ValueError("Lỗi: Model không trả về attentions! Hãy kiểm tra 'attn_implementation=eager'")
 
     return seq_out, pooled_out, enc_attentions
 
