@@ -577,11 +577,11 @@ def main():
             best_path = f'{args.output_dir}/seed_{args.seed}_fcmf_model_best.pth'
         if os.path.exists(best_path):
             logger.info(f"Loading Best Checkpoint from: {best_path}")
-            checkpoint = torch.load(best_path, map_location=device, weights_only=False, strict=False)
+            checkpoint = torch.load(best_path, map_location=device, weights_only=False)
             if isinstance(model, (DDP, torch.nn.DataParallel)):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
             else:
-                model.load_state_dict(checkpoint['model_state_dict'])
+                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
             
             # Load ResNets
             rimg_path = best_path.replace("fcmf", "resimg")
