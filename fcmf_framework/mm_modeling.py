@@ -434,8 +434,7 @@ class FeatureExtractor(torch.nn.Module):
   def __init__(self, pretrained_path):
     super(FeatureExtractor,self).__init__()
     self.cell = AutoModel.from_pretrained(pretrained_path,
-                                          local_files_only=True,
-                                          attn_implementation="eager")
+                                          local_files_only=True)
 
   def forward(self, input_ids, token_type_ids, attention_mask):
     seq_out, pooled_out, enc_attentions = self.cell(input_ids = input_ids,
