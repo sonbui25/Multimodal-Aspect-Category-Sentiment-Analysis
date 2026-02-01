@@ -597,7 +597,7 @@ def main():
                 unwrap_rroi.load_state_dict(rroi_ckpt['model_state_dict'], strict=False)
         else:
             logger.warning("No best model found! Using current weights.")
-
+        model.encoder.bert.cell.resize_token_embeddings(len(tokenizer))
         model.eval(); resnet_img.eval(); resnet_roi.eval()
 
         true_label_list = {asp:[] for asp in ASPECT}
