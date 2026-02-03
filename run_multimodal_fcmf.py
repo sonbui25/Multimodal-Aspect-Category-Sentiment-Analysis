@@ -513,23 +513,18 @@ def main():
 
                         roi_img_features = roi_img_features.float()
 
-                        if args.num_imgs > 0:
-                            encoded_img = []
-                            for img_idx in range(args.num_imgs):
-                                img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
-                                encoded_img.append(img_f)
-                            vis_embeds = torch.stack(encoded_img, dim=1)
-                        else:
-                            vis_embeds = None  # hoặc torch.zeros(...)
-
-                        if args.num_imgs > 0 and args.num_rois > 0:
-                            encoded_roi = []
-                            for img_idx in range(args.num_imgs):
-                                roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
-                                encoded_roi.append(torch.stack(roi_list, dim=1))
-                            roi_embeds = torch.stack(encoded_roi, dim=1)
-                        else:
-                            roi_embeds = None  # hoặc torch.zeros(...)
+                        encoded_img = []
+                        for img_idx in range(args.num_imgs):
+                            img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
+                            encoded_img.append(img_f)
+                        
+                        encoded_roi = []
+                        for img_idx in range(args.num_imgs):
+                            roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
+                            encoded_roi.append(torch.stack(roi_list, dim=1))
+                        
+                        vis_embeds = torch.stack(encoded_img, dim=1)
+                        roi_embeds = torch.stack(encoded_roi, dim=1)
 
                         for id_asp in range(len(ASPECT)):
                             logits = model(
@@ -621,23 +616,16 @@ def main():
 
                 roi_img_features = roi_img_features.float()
 
-                if args.num_imgs > 0:
-                    encoded_img = []
-                    for img_idx in range(args.num_imgs):
-                        img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
-                        encoded_img.append(img_f)
-                    vis_embeds = torch.stack(encoded_img, dim=1)
-                else:
-                    vis_embeds = None  # hoặc torch.zeros(...)
-
-                if args.num_imgs > 0 and args.num_rois > 0:
-                    encoded_roi = []
-                    for img_idx in range(args.num_imgs):
-                        roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
-                        encoded_roi.append(torch.stack(roi_list, dim=1))
-                    roi_embeds = torch.stack(encoded_roi, dim=1)
-                else:
-                    roi_embeds = None  # hoặc torch.zeros(...)
+                encoded_img = []
+                for img_idx in range(args.num_imgs):
+                    img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
+                    encoded_img.append(img_f)
+                encoded_roi = []
+                for img_idx in range(args.num_imgs):
+                    roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
+                    encoded_roi.append(torch.stack(roi_list, dim=1))
+                vis_embeds = torch.stack(encoded_img, dim=1)
+                roi_embeds = torch.stack(encoded_roi, dim=1)
 
                 # Initialize logs for current batch
                 batch_logs = [{"text": t, "aspects": {}} for t in batch_texts]
