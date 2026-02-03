@@ -83,7 +83,7 @@ def main():
     # Argument to resume training from a specific checkpoint
     parser.add_argument("--resume_from_checkpoint", default=None, type=str,
                         help="Path to the checkpoint .pth file to resume training from.")
-    parser.add_argument("--model_checkpoint", default=None, type=str,
+    parser.add_argument("--model_checkpoint", default='checkpoint_path', type=str,
                         help="Path to the checkpoint .pth file to resume training from.")
     # --- HYPERPARAMETERS ---
     parser.add_argument("--list_aspect", default=['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area'],
@@ -446,19 +446,23 @@ def main():
 
                     with torch.amp.autocast('cuda', enabled=args.fp16):
                         # Feature Extraction
-                        encoded_img = []
-                        for img_idx in range(args.num_imgs):
-                            img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
-                            encoded_img.append(img_f)
-                        
-                        encoded_roi = []
-                        for img_idx in range(args.num_imgs):
-                            roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
-                            encoded_roi.append(torch.stack(roi_list, dim=1))
-                        
-                        vis_embeds = torch.stack(encoded_img, dim=1)
-                        roi_embeds = torch.stack(encoded_roi, dim=1)
+                        if args.num_imgs > 0:
+                            encoded_img = []
+                            for img_idx in range(args.num_imgs):
+                                img_f = resnet_img(t_img_features[:,img_idx,:]).view(-1,2048,49).permute(0,2,1).squeeze(1)
+                                encoded_img.append(img_f)
+                            vis_embeds = torch.stack(encoded_img, dim=1)
+                        else:
+                            vis_embeds = None  # hoặc torch.zeros(...)
 
+                        if args.num_imgs > 0 and args.num_rois > 0:
+                            encoded_roi = []
+                            for img_idx in range(args.num_imgs):
+                                roi_list = [resnet_roi(roi_img_features[:,img_idx,r,:]).squeeze(1) for r in range(args.num_rois)]
+                                encoded_roi.append(torch.stack(roi_list, dim=1))
+                            roi_embeds = torch.stack(encoded_roi, dim=1)
+                        else:
+                            roi_embeds = None
                         # Loop Aspects
                         all_asp_loss = 0
                         for id_asp in range(len(ASPECT)):

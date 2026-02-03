@@ -7,6 +7,7 @@ data/
 *custom*
 # Ignore các file có chứa từ khóa visualize
 *visualize*
+*inference_with_labels*
 #Model
 checkpoints*
 *.pth
