@@ -321,7 +321,7 @@ def main():
         else: checkpoint = load_model(args.weight_path)
         
         model.load_state_dict(checkpoint['model_state_dict'])
-        model.eval()  # ✅ SET MODEL TO EVALUATION MODE
+        model.eval()  # SET MODEL TO EVALUATION MODE
         ASPECT = np.asarray(ASPECT)
         image_path_list = os.listdir(args.image_dir)
         img_label_dict = {}
@@ -329,7 +329,7 @@ def main():
         for img_path in tqdm(image_path_list, desc="Inferencing"):
             lb = predict_wrapper(model, ASPECT,args.image_dir, img_path,device)
             img_label_dict[img_path] = lb
-            print(f"Image: {img_path} --> Categories: {lb}")
+            # print(f"Image: {img_path} --> Categories: {lb}")
         with open(f"{args.output_dir}/resnet152_image_label.json", "w",encoding='utf-8') as f:
             json.dump(img_label_dict, f,indent = 2,ensure_ascii=False)
 
