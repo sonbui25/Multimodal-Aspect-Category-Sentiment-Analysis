@@ -89,6 +89,13 @@ def predict_wrapper(model, list_aspect, root_dir, img_path,device):
     img = convert_img_to_tensor(root_dir, img_path)
     pred = model(img.unsqueeze(0).to(device))
     pred = torch.sigmoid(pred).squeeze(0)
+    
+    # Debug: print scores
+    scores_dict = {list_aspect[i]: pred[i].item() for i in range(len(list_aspect))}
+    print(f"\n[DEBUG] {img_path}:")
+    for aspect, score in scores_dict.items():
+        print(f"  {aspect}: {score:.4f}")
+    
     pred = pred > 0.45 
     pred = pred.cpu().numpy().astype(int)
     pred = np.where(pred==1)[0]
