@@ -216,86 +216,8 @@ def main():
                 max_accracy = all_accuracy
                 logger.info(f"New Best Accuracy: {max_accracy:.4f}")
 
-        # --- TEST SECTION (FIXED ORDER & FORMAT) ---
-        output_test_file = os.path.join(args.output_dir, "test_image_results.txt")
-        output_detail_file = os.path.join(args.output_dir, "test_image_predictions_detail.txt")
-        
-        logger.info("***** Running evaluation on Test Set *****")
-        checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_image_model.pth')
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.eval()
+        logger.info("***** Training completed successfully *****")
 
-        true_label_list = {asp:[] for asp in ASPECT}
-        pred_label_list = {asp:[] for asp in ASPECT}
-        
-        # Dùng set để gom nhóm aspect unique (phòng trường hợp 1 ảnh bị lặp dòng)
-        results_map = defaultdict(lambda: {"gold": set(), "pred": set()})
-
-        for step, batch in enumerate(tqdm(test_loader, position=0, leave=True, desc="Test")):
-            input = batch['image'].to(device)
-            label = batch['label'].to(device)
-            filenames = batch['filename']
-            
-            with torch.no_grad():
-                logits = model(input)
-                logits = torch.sigmoid(logits).cpu().numpy() 
-                label_np = label.cpu().numpy()               
-
-                # Metric calculation standard logic
-                for id_asp in range(len(ASPECT)):
-                    asp_label = label[:,id_asp].cpu().numpy()
-                    pred = np.asarray(logits[:,id_asp] > 0.7).astype(int) 
-                    true_label_list[idx2asp[id_asp]].append(asp_label)
-                    pred_label_list[idx2asp[id_asp]].append(pred)
-
-                # --- Aggregation Logic ---
-                batch_size = input.shape[0]
-                threshold = 0.7
-                
-                for i in range(batch_size):
-                    fname = filenames[i]
-                    pred_indices = np.where(logits[i] > threshold)[0]
-                    gold_indices = np.where(label_np[i] == 1)[0]
-                    
-                    pred_aspects = [ASPECT[idx] for idx in pred_indices]
-                    gold_aspects = [ASPECT[idx] for idx in gold_indices]
-                    
-                    results_map[fname]["gold"].update(gold_aspects)
-                    results_map[fname]["pred"].update(pred_aspects)
-
-        # Ghi Metrics chung
-        with open(output_test_file, "w", encoding='utf-8') as writer:
-            writer.write("***** TEST RESULTS (Image Categories) *****\n")
-            test_all_f1, test_all_accuracy = 0, 0
-            for id_asp in range(len(ASPECT)):
-                tr = np.concatenate(true_label_list[idx2asp[id_asp]])
-                pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
-                precision, recall, f1_score = macro_f1(tr,pr)
-                accuracy = accuracy_score(tr,pr)
-                writer.write(f"{idx2asp[id_asp]:<20} | F1: {f1_score:.4f} | Acc: {accuracy:.4f}\n")
-                test_all_f1 += f1_score; test_all_accuracy += accuracy
-
-            test_all_f1 /= len(ASPECT); test_all_accuracy /= len(ASPECT)
-            writer.write(f"MACRO AVG | F1: {test_all_f1:.4f} | Acc: {test_all_accuracy:.4f}\n")
-
-        # Ghi Detailed Log (Duyệt theo thứ tự UNIQUE trong dataframe gốc)
-        test_ordered_files = test_data['file_name'].unique()
-        
-        with open(output_detail_file, "w", encoding='utf-8') as f:
-            for fname in test_ordered_files:
-                if fname in results_map:
-                    content = results_map[fname]
-                    # Sort để aspect 1 luôn đứng trước aspect 2
-                    sorted_gold = sorted(list(content["gold"]))
-                    sorted_pred = sorted(list(content["pred"]))
-                    
-                    # Format chính xác như yêu cầu
-                    f.write(f'"{fname}": [\n')
-                    f.write(f'    Gold_Label: {json.dumps(sorted_gold, ensure_ascii=False)},\n')
-                    f.write(f'    Prediction: {json.dumps(sorted_pred, ensure_ascii=False)},\n')
-                    f.write('  ],\n')
-        
-        logger.info(f"Saved detailed predictions (Quantity: {len(test_ordered_files)}) to {output_detail_file}")
 
     if args.get_cate:
         print("===================== GET IMAGE CATEGORIES =====================")
