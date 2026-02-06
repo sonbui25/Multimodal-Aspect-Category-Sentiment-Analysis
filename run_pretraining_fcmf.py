@@ -134,6 +134,15 @@ def main():
         train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         
+        # Áp dụng tiền xử lý cho decoder input (iaog_labels)
+        def preprocess_iaog_labels(labels):
+            if not isinstance(labels, list):
+                return labels
+            return [normalize_class.normalize(text_normalize(convert_unicode(label))) for label in labels]
+        
+        train_data['iaog_labels'] = train_data['iaog_labels'].apply(preprocess_iaog_labels)
+        dev_data['iaog_labels'] = dev_data['iaog_labels'].apply(preprocess_iaog_labels)
+        
         if ddp_world_size > 1:
             chunk = len(train_data) // ddp_world_size
             train_data = train_data.iloc[chunk*ddp_local_rank : chunk*(ddp_local_rank+1)]
