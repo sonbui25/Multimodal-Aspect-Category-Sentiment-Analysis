@@ -326,10 +326,32 @@ def main():
         image_path_list = os.listdir(args.image_dir)
         img_label_dict = {}
         
-        for img_path in tqdm(image_path_list, desc="Inferencing"):
-            lb = predict_wrapper(model, ASPECT,args.image_dir, img_path,device)
-            img_label_dict[img_path] = lb
-            # print(f"Image: {img_path} --> Categories: {lb}")
+        # Batch processing for faster inference
+        batch_size = args.eval_batch_size
+        for batch_idx in tqdm(range(0, len(image_path_list), batch_size), desc="Inferencing"):
+            batch_images = image_path_list[batch_idx:batch_idx + batch_size]
+            batch_tensors = []
+            
+            # Load and convert batch of images
+            for img_path in batch_images:
+                img = convert_img_to_tensor(args.image_dir, img_path)
+                batch_tensors.append(img)
+            
+            # Stack and process batch
+            batch_tensor = torch.stack(batch_tensors).to(device)
+            
+            with torch.no_grad():
+                batch_preds = model(batch_tensor)
+                batch_preds = torch.sigmoid(batch_preds).cpu().numpy()
+            
+            # Threshold and extract categories
+            for i, img_path in enumerate(batch_images):
+                pred_scores = batch_preds[i]
+                pred_mask = pred_scores > 0.45
+                pred_indices = np.where(pred_mask)[0]
+                lb = list(ASPECT[pred_indices])
+                img_label_dict[img_path] = lb
+        
         with open(f"{args.output_dir}/resnet152_image_label.json", "w",encoding='utf-8') as f:
             json.dump(img_label_dict, f,indent = 2,ensure_ascii=False)
 

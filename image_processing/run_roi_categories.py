@@ -311,19 +311,27 @@ def main():
             df_roi = roi_df[roi_df['file_name']==img_name][:6].reset_index()
             num_roi = df_roi.shape[0]
 
-            image_aspect = []
+            # Batch process ROIs for faster inference
+            roi_batch = []
             for i in range(num_roi):
                 x1 = df_roi.loc[i,'x1']; x2 = df_roi.loc[i,'x2']
                 y1 = df_roi.loc[i,'y1']; y2 = df_roi.loc[i,'y2']
                 roi_img = image[:,x1:x2,y1:y2]
-                roi_img = convert_img_to_tensor(roi_img).unsqueeze(0).to(device)
-                
-                with torch.no_grad():
-                    pred = model(roi_img)
-                    pred = np.argmax(pred.cpu().numpy(),axis=-1)
-                    image_aspect.append(ASPECT[pred][0])
+                roi_tensor = convert_img_to_tensor(roi_img)
+                roi_batch.append(roi_tensor)
             
-            image_aspect = list(set(image_aspect))
+            # Stack ROIs and process as batch
+            if len(roi_batch) > 0:
+                roi_batch_tensor = torch.stack(roi_batch).to(device)
+                with torch.no_grad():
+                    preds = model(roi_batch_tensor)
+                    preds = np.argmax(preds.cpu().numpy(), axis=-1)
+                
+                image_aspect = [ASPECT[pred] for pred in preds]
+                image_aspect = list(set(image_aspect))
+            else:
+                image_aspect = []
+            
             image_label_dict[p] = image_aspect
             
         with open(f"{args.output_dir}/resnet152_roi_label.json", "w",encoding='utf-8') as f:
