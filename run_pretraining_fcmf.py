@@ -131,17 +131,41 @@ def main():
     if args.do_train:
         train_data = pd.read_json(f'{args.pretrained_data_dir}/train_with_iaog.json')
         dev_data = pd.read_json(f'{args.pretrained_data_dir}/dev_with_iaog.json')
+        
+        # Check if iaog_labels column exists
+        if 'iaog_labels' not in train_data.columns or 'iaog_labels' not in dev_data.columns:
+            raise ValueError("'iaog_labels' column not found in data. Check JSON file structure.")
+        
         train_data['comment'] = train_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         dev_data['comment'] = dev_data['comment'].apply(lambda x: normalize_class.normalize(text_normalize(convert_unicode(x))))
         
-        # Áp dụng tiền xử lý cho decoder input (iaog_labels)
+        # Tiền xử lý decoder input: chỉ preprocess phần sentiment word (trước #)
         def preprocess_iaog_labels(labels):
             if not isinstance(labels, list):
                 return labels
-            return [normalize_class.normalize(text_normalize(convert_unicode(label))) for label in labels]
+            processed = []
+            for label in labels:
+                if '#' not in label:
+                    processed.append(label)
+                    continue
+                parts = label.split('#', 1)  # Split only on first #
+                sentiment_word = parts[0].strip()
+                aspect = parts[1].strip() if len(parts) > 1 else ''
+                # Preprocess chỉ sentiment word
+                processed_sentiment = normalize_class.normalize(text_normalize(convert_unicode(sentiment_word)))
+                processed.append(f"{processed_sentiment}#{aspect}")
+            return processed
         
         train_data['iaog_labels'] = train_data['iaog_labels'].apply(preprocess_iaog_labels)
         dev_data['iaog_labels'] = dev_data['iaog_labels'].apply(preprocess_iaog_labels)
+        
+        # Debug: Log statistics
+        if master_process:
+            train_empty = train_data['iaog_labels'].apply(lambda x: not isinstance(x, list) or len(x) == 0).sum()
+            dev_empty = dev_data['iaog_labels'].apply(lambda x: not isinstance(x, list) or len(x) == 0).sum()
+            logger.info(f"Train data rows with empty iaog_labels: {train_empty}/{len(train_data)}")
+            logger.info(f"Dev data rows with empty iaog_labels: {dev_empty}/{len(dev_data)}")
+            logger.info(f"Sample iaog_labels after preprocessing: {train_data['iaog_labels'].iloc[0] if len(train_data) > 0 else 'N/A'}")
         
         if ddp_world_size > 1:
             chunk = len(train_data) // ddp_world_size
@@ -149,6 +173,16 @@ def main():
 
         train_dataset = IAOGDataset(train_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder)
         dev_dataset = IAOGDataset(dev_data, tokenizer, args.image_dir, roi_df, dict_image_aspect, dict_roi_aspect, args.num_imgs, args.num_rois, args.max_len_decoder)
+        
+        if master_process:
+            logger.info(f"Train dataset size after filtering: {len(train_dataset)}")
+            logger.info(f"Dev dataset size after filtering: {len(dev_dataset)}")
+            if len(train_dataset) == 0:
+                logger.error(f"train_dataset is empty! Input train_data had {len(train_data)} rows but no valid samples after IAOGDataset filtering.")
+                logger.error(f"Check if 'iaog_labels' have valid format: 'sentiment_word#aspect_name'")
+                logger.error(f"Valid aspects: ['Location', 'Food', 'Room', 'Facilities', 'Service', 'Public_area']")
+
+
 
     # --- 3. MODEL ---
     model = FCMFSeq2Seq(len(tokenizer), args.max_len_decoder, args.pretrained_hf_model, args.num_imgs, args.num_rois, args.alpha)
@@ -178,7 +212,7 @@ def main():
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     
     if args.fp16:
-        scaler = GradScaler()
+        scaler = torch.amp.GradScaler('cuda')
     else:
         scaler = None
     
