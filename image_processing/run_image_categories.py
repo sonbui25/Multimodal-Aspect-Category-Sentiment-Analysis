@@ -318,10 +318,10 @@ def main():
         image_path_list = os.listdir(args.image_dir)
         img_label_dict = {}
         
-        print("Hi")
         for img_path in tqdm(image_path_list, desc="Inferencing"):
             lb = predict_wrapper(model, ASPECT,args.image_dir, img_path,device)
             img_label_dict[img_path] = lb
+            print(f"Image: {img_path} --> Categories: {lb}")
         with open(f"{args.output_dir}/resnet152_image_label.json", "w",encoding='utf-8') as f:
             json.dump(img_label_dict, f,indent = 2,ensure_ascii=False)
 
