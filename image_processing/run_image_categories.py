@@ -216,7 +216,92 @@ def main():
                 max_accracy = all_accuracy
                 logger.info(f"New Best Accuracy: {max_accracy:.4f}")
 
-        logger.info("***** Training completed successfully *****")
+        output_test_file = os.path.join(args.output_dir, "test_image_results.txt")
+        with open(output_test_file, "a") as writer:
+            writer.write("***** Running evaluation on Test Set *****\n")
+            writer.write(f"  Num examples = {test_data.shape[0]}\n" )
+            writer.write(f"  Batch size = {args.eval_batch_size}\n")
+
+            logger.info("***** Running evaluation on Test Set *****")
+            logger.info("  Num examples = %d", test_data.shape[0])
+            logger.info("  Batch size = %d", args.eval_batch_size)
+
+        checkpoint = load_model(f'{args.output_dir}/seed_{args.seed}_image_model.pth')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+
+        test_epoch_loss = 0
+
+        for step, batch in enumerate(tqdm(test_loader, position=0, leave=True, desc="Evaluating")):
+            input = batch['image']
+            label = batch['label']
+
+            input = input.to(device)
+            label = label.to(device)
+            
+            with torch.no_grad():
+                logits = model(input)
+                loss = criterion(logits,label.float())
+                test_epoch_loss += loss.item()
+                logits = torch.sigmoid(logits)
+
+                logits = logits.cpu().numpy()
+
+                for id_asp in range(len(ASPECT)):
+                    asp_label = label[:,id_asp].cpu().numpy()
+                    
+                    pred = np.asarray(logits[:,id_asp] > 0.7).astype(int) # multi-label threshold 
+
+                    true_label_list[idx2asp[id_asp]].append(asp_label)
+                    pred_label_list[idx2asp[id_asp]].append(pred)
+
+        if step == 0:
+            step = 1
+        test_epoch_loss /= step 
+
+        with open(output_test_file, "a") as writer:
+            logger.info("***** Precision, Recall, F1-score, Accuracy for each Aspect *****")
+            writer.write("***** Precision, Recall, F1-score, Accuracy for each Aspect *****\n")
+
+        test_all_precision, test_all_recall, test_all_f1 = 0, 0, 0
+        test_all_accuracy = 0
+        for id_asp in range(len(ASPECT)):
+            tr = np.concatenate(true_label_list[idx2asp[id_asp]])
+            pr = np.concatenate(pred_label_list[idx2asp[id_asp]])
+
+            precision, recall, f1_score = macro_f1(tr,pr)
+            accuracy = accuracy_score(tr,pr)
+            aspect_rs = {idx2asp[id_asp]:[precision,recall,f1_score,accuracy]}
+
+            with open(output_test_file, "a") as writer:
+                for key in sorted(aspect_rs.keys()):
+                    logger.info("  %s = %s", key, str(aspect_rs[key]))
+                    writer.write(f"{key} = {str(aspect_rs[key])}\n")
+
+            test_all_precision += precision
+            test_all_recall += recall
+            test_all_f1 += f1_score
+            test_all_accuracy += accuracy
+
+        test_all_precision /= len(ASPECT)
+        test_all_recall /= len(ASPECT)
+        test_all_f1 /= len(ASPECT)
+        test_all_accuracy /= len(ASPECT)
+
+        results = {'eval_loss': test_epoch_loss,
+                    'precision_score':test_all_precision,
+                    'recall_score':test_all_recall,
+                    'f_score': test_all_f1,
+                    'accuracy': test_all_accuracy
+                    }
+        
+        with open(output_test_file, "a") as writer:
+            logger.info("***** Test Eval results *****")
+            writer.write("***** Test Eval results *****\n")
+
+            for key in sorted(results.keys()):
+                logger.info("  %s = %s", key, str(results[key]))
+                writer.write(f"{key} = {str(results[key])}\n")
 
 
     if args.get_cate:
@@ -236,7 +321,7 @@ def main():
         for img_path in tqdm(image_path_list, desc="Inferencing"):
             lb = predict_wrapper(model, ASPECT,args.image_dir, img_path,device)
             img_label_dict[img_path] = lb
-
+            print(f"Image: {img_path} --> Categories: {lb}")
         with open(f"{args.output_dir}/resnet152_image_label.json", "w",encoding='utf-8') as f:
             json.dump(img_label_dict, f,indent = 2,ensure_ascii=False)
 
