@@ -321,6 +321,7 @@ def main():
         else: checkpoint = load_model(args.weight_path)
         
         model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()  # ✅ SET MODEL TO EVALUATION MODE
         ASPECT = np.asarray(ASPECT)
         image_path_list = os.listdir(args.image_dir)
         img_label_dict = {}
