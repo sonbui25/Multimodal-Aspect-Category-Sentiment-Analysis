@@ -16,8 +16,8 @@ class FCMF(nn.Module):
         self.text_pooler = BertPooler()
         self.dropout = nn.Dropout(HIDDEN_DROPOUT_PROB)
         self.classifier = nn.Linear(HIDDEN_SIZE, num_labels)
-        self.apply_custom_init(self.text_pooler)
-        self.apply_custom_init(self.classifier)
+        # self.apply_custom_init(self.text_pooler)
+        # self.apply_custom_init(self.classifier)
     # Hàm khởi tạo trọng số chuẩn BERT
     def _init_weights(self, module):
         """Initialize the weights"""
