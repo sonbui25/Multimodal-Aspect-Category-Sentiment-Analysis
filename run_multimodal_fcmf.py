@@ -391,21 +391,21 @@ def main():
         missing_keys, unexpected_keys = model_to_load.load_state_dict(encoder_state_dict, strict=False)
         
         # Load ResNet Image từ IAOG
-        dir_name = os.path.dirname(args.pretrained_iaog_path)
-        resimg_path = args.pretrained_iaog_path.replace("iaog_model", "resimg_model")
-        if os.path.exists(resimg_path):
-            if master_process: logger.info(f"    Loading ResNet Image from IAOG: {resimg_path}")
-            resimg_ckpt = torch.load(resimg_path, map_location=device, weights_only=False)
-            unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
-            unwrap_resimg.load_state_dict(resimg_ckpt['model_state_dict'])
+        # dir_name = os.path.dirname(args.pretrained_iaog_path)
+        # resimg_path = args.pretrained_iaog_path.replace("iaog_model", "resimg_model")
+        # if os.path.exists(resimg_path):
+        #     if master_process: logger.info(f"    Loading ResNet Image from IAOG: {resimg_path}")
+        #     resimg_ckpt = torch.load(resimg_path, map_location=device, weights_only=False)
+        #     unwrap_resimg = resnet_img.module if hasattr(resnet_img, 'module') else resnet_img
+        #     unwrap_resimg.load_state_dict(resimg_ckpt['model_state_dict'])
         
-        # Load ResNet ROI từ IAOG
-        resroi_path = args.pretrained_iaog_path.replace("iaog_model", "resroi_model")
-        if os.path.exists(resroi_path):
-            if master_process: logger.info(f"    Loading ResNet ROI from IAOG: {resroi_path}")
-            resroi_ckpt = torch.load(resroi_path, map_location=device, weights_only=False)
-            unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
-            unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
+        # # Load ResNet ROI từ IAOG
+        # resroi_path = args.pretrained_iaog_path.replace("iaog_model", "resroi_model")
+        # if os.path.exists(resroi_path):
+        #     if master_process: logger.info(f"    Loading ResNet ROI from IAOG: {resroi_path}")
+        #     resroi_ckpt = torch.load(resroi_path, map_location=device, weights_only=False)
+        #     unwrap_resroi = resnet_roi.module if hasattr(resnet_roi, 'module') else resnet_roi
+        #     unwrap_resroi.load_state_dict(resroi_ckpt['model_state_dict'])
         
         if master_process: logger.info(f"--> Pretrained Encoder and ResNets loaded successfully.")
     else:
