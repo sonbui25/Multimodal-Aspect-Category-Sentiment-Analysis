@@ -1,110 +1,58 @@
-# ViMACSA: Vietnamese Multimodal Aspect-Category Sentiment Analysis
-# Overview
-*  Introduce a new Vietnamese multimodal dataset, named ViMACSA, which consists of 4,876 text-image pairs with 14,618 fine-grained annotations for both text and image in the hotel domain.
-*  Propose a Fine-Grained Cross-Modal Fusion Framework (FCMF) that effectively learns both intra- and inter-modality interactions.
-  
-<img src="images/overview_fcmf.png" width="512" height="512">
+# 🌟 Vietnamese Multimodal Aspect-Category Sentiment Analysis (MACSA) with Implicit Aspects
 
-## Table of Contents
+This project focuses on tackling the "implicit aspects" challenge in Multimodal Aspect-Category Sentiment Analysis (MACSA). Implicit aspects are target objects that only appear visually in images but are not explicitly mentioned in the accompanying text, causing semantic disconnection for traditional sentiment analysis models.
 
-- [Dataset](#dataset)
-- [Running The Code](#running-the-code)
-- [Compare with different baseline models](#compare-with-different-baseline-models)
-- [Citation](#citation)
-- [To Do](#todo)
+We propose a novel approach by integrating a Sequence-to-Sequence (Seq2Seq) pre-training strategy into the **Fine-Grained Cross-Modal Fusion (FCMF)** framework to enhance the semantic alignment between visual and textual modalities.
 
-# Dataset
-Our ViMACSA dataset comprises 4,876 documents and 14,000 images. Each document is accompanied by up to 7 images. This dataset is constructed with the goal of recognizing both explicit aspects and implicit aspects in the document.
+## 👥 Authors
+* **Son Truong Thai Bui**
+* **Nguyen Dac Luong**
+* **Long Hoang Ung**
 
-<p align="left">
-  <img src="images/ex_data.png" />
-</p>
+*(Faculty of Information Science and Engineering, University of Information Technology, VNU-HCM)*
 
+## 🎯 Key Contributions
+* **Identifying the Challenge:** Analysis of the "implicit aspect" problem in Vietnamese MACSA and identification of the limitations of current multimodal approaches.
+* **Novel Architecture:** Proposal of a pre-training task called **Implicit Aspect Opinion Generation (IAOG)** based on a Seq2Seq architecture. This forces the model to actively learn how to generate descriptive sentiment words corresponding to the hidden entities detected in the visual data.
+* **State-of-the-Art (SOTA) Performance:** The FCMF model integrated with IAOG significantly improves performance over the original FCMF and outperforms current SOTA architectures (mRoBERTa, tomRoBERTa, EF-CapTrRoBERTa) on implicit aspect datasets.
 
-To understand more about the dataset, please read this paper: [New Benchmark Dataset and Fine-Grained Cross-Modal Fusion Framework for Vietnamese Multimodal Aspect-Category Sentiment Analysis
-](https://arxiv.org/abs/2405.00543) 
+## ⚙️ System Architecture
 
-Our dataset is used only for research purposes. Download our ViMACSA dataset on reasonable request: https://drive.google.com/file/d/1OjWwzdbhvhYc864Tpt6Xw9anBLfgNwmt/view?usp=sharing
+The system operates in two main phases:
 
-## Dataset statistics
-![The overview statistics of ViMACSA dataset](images/dataset_stat.png)
-*Table 1. The overview statistics of ViMACSA dataset.*
+1.  **Phase 1 (Pre-training):** Transformation of the FCMF framework into a Seq2Seq architecture by adding a Decoder to perform the IAOG task. This aligns the hidden aspects and sentiment words.
+2.  **Phase 2 (Fine-tuning):** The Decoder is removed, and the knowledge-enriched FCMF Encoder is used directly for the main Vietnamese MACSA classification task.
 
-# Running The Code
-## Install Requirements
-```
+## 📊 Experimental Results
+
+Experiments were conducted on a subset containing implicit aspects extracted from the ViMACSA dataset. 
+
+| Models | Precision | Recall | F1-score |
+| :--- | :---: | :---: | :---: |
+| mRoBERTa | 50.80 | 52.38 | 42.98 |
+| tomRoBERTa | 67.31 | 66.85 | 63.16 |
+| EF-CapTrRoBERTa | **71.93** | 65.28 | 65.75 |
+| **FCMF + IAOG (Ours)** | 70.51 | **74.12** | **72.27** |
+
+**Insight:** The proposed method shows exceptional capability in highly challenging categories with a large number of implicit aspects, such as *Public area*.
+
+## 📂 Datasets
+The datasets have been cleaned and processed for both phases of the project:
+* **IAOG Pre-training Dataset:** [Kaggle Link](https://www.kaggle.com/datasets/snbitrngthi/iaog-filtered)
+* **Implicit ViMACSA Experimental Dataset:** [Kaggle Link](https://www.kaggle.com/datasets/snbitrngthi/implicit-vimacsa)
+
+## 🚀 Setup & Run
+
+```bash
+# 1. Clone the repository
+git clone [https://github.com/your-username/Multimodal-Aspect-Category-Sentiment-Analysis.git](https://github.com/your-username/Multimodal-Aspect-Category-Sentiment-Analysis.git)
+cd Multimodal-Aspect-Category-Sentiment-Analysis
+
+# 2. Install required packages
 pip install -r requirements.txt
-```
-## Get Image/RoI Aspect Category
-### Image
-```
-python image_processing/run_image_categories.py 
-      --image_dir path_to_image_folder
-      --image_label_path path_to_image_label #all_image_label.xlsx 
-      --output_dir test_image 
-      --do_train 
-      --get_cate #whether to get image category
-```
-### RoI
-```
-python image_processing/run_roi_categories.py 
-      --image_dir path_to_image_folder 
-      --roi_label_path path_to_roi_label #test_roi_data.csv 
-      --output_dir test_image 
-      --do_train 
-      --get_cate #whether to get RoI category
-```
 
-## Training FCMF Framework
-```
-!torchrun --standalone --nproc_per_node=n_gpu run_multimodal_fcmf.py
-        --data_dir data_folder_dir
-        --list_aspect Location Food Room Facilities Service Public_area 
-        --num_polarity 4 --num_imgs 7 --num_rois 4
-        --image_dir path_to_image_folder
-        --pretrained_model vinai/phobert-base 
-        --output_dir model_output 
-        --train_batch_size 8  --eval_batch_size 8 
-        --num_train_epochs 8
-        --learning_rate 3e-5 
-        --warmup_proportion 0.1 --gradient_accumulation_steps 2 
-        --do_train
-        --fp16 
-        --ddp 
-```
-## Inference
-Download our weights and place them in the same folder: https://drive.google.com/file/d/1NHI24JxyjXfi1lU7nF99-TV7vBL-StZm/view?usp=sharing
-```
-python inference.py --text "Khách sạn này rất đẹp, nhân viên nhiệt tình"
-                    --image_list image_0.png image_1.png image_2.png
-                    --num_rois 4
-```
+# 3. Run Pre-training (IAOG)
+python run_pretraining_fcmf.py
 
-# Compare with different baseline models.
-![Experiment results on the ViMACSA dataset](images/exper.png)                   
-*Table 2. Experiment results on the ViMACSA dataset.*
-
-# Citation
-Please cite the following paper if you use this dataset:
-```bibtex
-@article{nguyen2025new,
-  title={New benchmark dataset and fine-grained cross-modal fusion framework for Vietnamese multimodal aspect-category sentiment analysis},
-  author={Nguyen, Quy Hoang and Nguyen, Minh-Van Truong and Van Nguyen, Kiet},
-  journal={Multimedia Systems},
-  volume={31},
-  number={1},
-  pages={1--28},
-  year={2025},
-  publisher={Springer}
-}
-```
-
-# Contact
-If you have any questions, please feel free to contact nhq188@gmail.com.
-
-# Todo
-- [x] Multi GPU training with DDP.
-- [x] Custom classification class.
-- [x] Flexible Framework Architecture.
-- [x] Add Inference.
-- [ ] Intergate with Spark.
+# 4. Run Main MACSA Fine-tuning
+python run_multimodal_fcmf.py
