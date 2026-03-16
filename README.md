@@ -32,6 +32,7 @@ Experiments were conducted on a subset containing implicit aspects extracted fro
 | mRoBERTa | 50.80 | 52.38 | 42.98 |
 | tomRoBERTa | 67.31 | 66.85 | 63.16 |
 | EF-CapTrRoBERTa | **71.93** | 65.28 | 65.75 |
+| FCMF | 67.47 | 70.12 | 68.77 |
 | **FCMF + IAOG (Ours)** | 70.51 | **74.12** | **72.27** |
 
 **Insight:** The proposed method shows exceptional capability in highly challenging categories with a large number of implicit aspects, such as *Public area*.
